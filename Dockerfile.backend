@@ -1,0 +1,18 @@
+# syntax=docker/dockerfile:1
+
+# ---- deps: install production dependencies only ----
+FROM node:22-alpine AS deps
+WORKDIR /app
+COPY backend/package.json backend/package-lock.json ./
+RUN npm ci --omit=dev
+
+# ---- runtime: copy node_modules + source, no npm/build tooling ----
+FROM node:22-alpine AS runtime
+WORKDIR /app
+ENV NODE_ENV=production
+COPY --from=deps --chown=node:node /app/node_modules ./node_modules
+COPY --chown=node:node backend/package.json ./
+COPY --chown=node:node backend/src ./src
+USER node
+EXPOSE 4000
+CMD ["node", "src/index.js"]
