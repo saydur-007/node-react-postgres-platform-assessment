@@ -6,11 +6,27 @@ on:
       - master
       - "pre-release/v*"
       - "release/v*"
+  pull_request:
   workflow_dispatch:
     inputs:
-      rollback_namespace:
-        description: "Namespace to roll back (leave empty to skip)"
-        required: false
+      environment:
+        description: "Environment to redeploy"
+        required: true
+        type: choice
+        options:
+          - dev
+          - preprod
+          - release
+      image_tag:
+        description: "Previous image tag to redeploy, e.g. master-abc1234 (see package versions on GHCR)"
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   REGISTRY: ghcr.io
@@ -19,14 +35,14 @@ env:
 
 jobs:
   build-and-test:
-    if: github.event_name == 'push'
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22"
 
       - name: Install backend dependencies
         working-directory: backend
@@ -36,13 +52,13 @@ jobs:
         working-directory: frontend
         run: npm ci
 
-      - name: Backend build validation
+      - name: Backend syntax check
         working-directory: backend
         run: node --check src/index.js
 
       - name: Backend tests
         working-directory: backend
-        run: npm test --if-present
+        run: npm test
 
       - name: Frontend build
         working-directory: frontend
@@ -52,6 +68,9 @@ jobs:
     if: github.event_name == 'push'
     needs: build-and-test
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     outputs:
       tag: ${{ steps.meta.outputs.tag }}
       namespace: ${{ steps.meta.outputs.namespace }}
@@ -73,6 +92,8 @@ jobs:
             release/v*) echo "namespace=release" >> "$GITHUB_OUTPUT" ;;
           esac
 
+      - uses: docker/setup-buildx-action@v3
+
       # GITHUB_TOKEN is short-lived and scoped to this repo/run only - no
       # long-lived registry credentials are stored anywhere in the repo.
       - name: Log in to GHCR
@@ -88,9 +109,9 @@ jobs:
           context: .
           file: Dockerfile.backend
           push: true
-          tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_BACKEND }}:${{ steps.meta.outputs.tag }}
-            ${{ env.REGISTRY }}/${{ env.IMAGE_BACKEND }}:${{ steps.meta.outputs.namespace }}-latest
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_BACKEND }}:${{ steps.meta.outputs.tag }}
+          cache-from: type=gha,scope=backend
+          cache-to: type=gha,mode=max,scope=backend
 
       - name: Build and push frontend image
         uses: docker/build-push-action@v6
@@ -98,63 +119,60 @@ jobs:
           context: .
           file: Dockerfile.frontend
           push: true
-          tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_FRONTEND }}:${{ steps.meta.outputs.tag }}
-            ${{ env.REGISTRY }}/${{ env.IMAGE_FRONTEND }}:${{ steps.meta.outputs.namespace }}-latest
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_FRONTEND }}:${{ steps.meta.outputs.tag }}
+          cache-from: type=gha,scope=frontend
+          cache-to: type=gha,mode=max,scope=frontend
 
   deploy:
     if: github.event_name == 'push'
     needs: build-and-push
     runs-on: ubuntu-latest
     environment: ${{ needs.build-and-push.outputs.namespace }}
+    permissions:
+      contents: read
+      packages: read
     steps:
       - uses: actions/checkout@v4
 
-      # KUBECONFIG_B64 is a base64-encoded kubeconfig stored as an encrypted
-      # GitHub Actions secret, scoped to a service account with access to
-      # only this cluster/namespace set - never printed or written to logs.
-      - name: Configure kubeconfig
-        run: |
-          mkdir -p "$HOME/.kube"
-          echo "${{ secrets.KUBECONFIG_B64 }}" | base64 -d > "$HOME/.kube/config"
+      - uses: ./.github/actions/deploy-to-kind
+        with:
+          namespace: ${{ needs.build-and-push.outputs.namespace }}
+          image-tag: ${{ needs.build-and-push.outputs.tag }}
+          registry: ${{ env.REGISTRY }}
+          image-backend: ${{ env.IMAGE_BACKEND }}
+          image-frontend: ${{ env.IMAGE_FRONTEND }}
+          github-actor: ${{ github.actor }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          db-user: ${{ secrets.DB_USER }}
+          db-password: ${{ secrets.DB_PASSWORD }}
+          db-name: ${{ secrets.DB_NAME }}
 
-      - name: Deploy manifests to ${{ needs.build-and-push.outputs.namespace }}
-        env:
-          NAMESPACE: ${{ needs.build-and-push.outputs.namespace }}
-          TAG: ${{ needs.build-and-push.outputs.tag }}
-        run: |
-          set -euo pipefail
-          mkdir -p /tmp/manifests
-          cp k8s/*.yaml /tmp/manifests/
-
-          # Point the deployments at the image just built and pushed.
-          sed -i "s#ghcr.io/.*-backend:.*#${REGISTRY}/${IMAGE_BACKEND}:${TAG}#" /tmp/manifests/backend-deployment.yaml
-          sed -i "s#ghcr.io/.*-backend:.*#${REGISTRY}/${IMAGE_BACKEND}:${TAG}#" /tmp/manifests/bullmq-worker-deployment.yaml
-          sed -i "s#ghcr.io/.*-frontend:.*#${REGISTRY}/${IMAGE_FRONTEND}:${TAG}#" /tmp/manifests/frontend-deployment.yaml
-
-          # Re-target every manifest at the environment-specific namespace.
-          sed -i "s/namespace: dev/namespace: ${NAMESPACE}/" /tmp/manifests/*.yaml
-
-          kubectl create namespace "${NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
-          kubectl apply -n "${NAMESPACE}" -f /tmp/manifests/
-          kubectl rollout status -n "${NAMESPACE}" deployment/backend --timeout=120s
-          kubectl rollout status -n "${NAMESPACE}" deployment/frontend --timeout=120s
-
+  # workflow_dispatch only. Spins up its own fresh ephemeral cluster (same
+  # as `deploy`) and redeploys a specific previously-built GHCR tag through
+  # the same steps - the "precise" rollback path. `kubectl rollout undo` is
+  # the "fast" path, but it only makes sense against a real, already-running
+  # cluster with deployment history; this job's cluster never has any, so
+  # that path isn't wired up here - see the README for running it directly
+  # against a live cluster.
   rollback:
-    if: github.event_name == 'workflow_dispatch' && inputs.rollback_namespace != ''
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    permissions:
+      contents: read
+      packages: read
     steps:
-      - name: Configure kubeconfig
-        run: |
-          mkdir -p "$HOME/.kube"
-          echo "${{ secrets.KUBECONFIG_B64 }}" | base64 -d > "$HOME/.kube/config"
+      - uses: actions/checkout@v4
 
-      # Fast path: undo the last rollout. The slower/more precise path is
-      # re-running this workflow with a previous commit checked out, which
-      # rebuilds and redeploys that exact previous image tag.
-      - name: Roll back last deployment
-        env:
-          NAMESPACE: ${{ inputs.rollback_namespace }}
-        run: |
-          kubectl rollout undo -n "${NAMESPACE}" deployment/backend
-          kubectl rollout undo -n "${NAMESPACE}" deployment/frontend
+      - uses: ./.github/actions/deploy-to-kind
+        with:
+          namespace: ${{ inputs.environment }}
+          image-tag: ${{ inputs.image_tag }}
+          registry: ${{ env.REGISTRY }}
+          image-backend: ${{ env.IMAGE_BACKEND }}
+          image-frontend: ${{ env.IMAGE_FRONTEND }}
+          github-actor: ${{ github.actor }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          db-user: ${{ secrets.DB_USER }}
+          db-password: ${{ secrets.DB_PASSWORD }}
+          db-name: ${{ secrets.DB_NAME }}
