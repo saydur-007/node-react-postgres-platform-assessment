@@ -2,7 +2,6 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: backend
-  namespace: dev
   labels:
     app.kubernetes.io/name: backend
     app.kubernetes.io/part-of: node-react-postgres-platform

@@ -2,7 +2,6 @@ apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: app-ingress
-  namespace: dev
   labels:
     app.kubernetes.io/part-of: node-react-postgres-platform
 spec:

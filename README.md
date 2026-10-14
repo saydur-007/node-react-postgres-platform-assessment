@@ -17,10 +17,15 @@ platform services, and observability.
 │   ├── src/                  # React app (App.jsx, main.jsx)
 │   ├── nginx.conf.template   # envsubst'd into nginx's config at container start
 │   └── vite.config.js
-├── k8s/                      # namespace, configmap, secret example, postgres
-│                             # StatefulSet + services, backend/frontend
-│                             # Deployments + services, kind cluster config,
-│                             # ingress
+├── k8s/
+│   ├── kind-config.yaml       # kind cluster config (cluster-level, not kustomized)
+│   ├── app-secrets.example.yaml   # placeholder shape only, never applied
+│   ├── base/                  # namespace-agnostic manifests (configmap,
+│   │                           # postgres StatefulSet + services,
+│   │                           # backend/frontend Deployments + services,
+│   │                           # ingress)
+│   └── overlays/{dev,preprod,release}/   # namespace, image tags, ingress
+│                                         # host per environment
 ├── docs/                     # evidence screenshots
 ├── docker-compose.yml
 ├── Dockerfile.backend
@@ -84,7 +89,7 @@ docker compose down -v
   `proxy_pass ${BACKEND_URL};` with no trailing slash, so `/api/items` is
   forwarded as `/api/items`, keeping the prefix the backend expects. The
   same image is used in `docker-compose.yml`
-  (`BACKEND_URL=http://backend:4000`) and in `k8s/app-configmap.yaml`
+  (`BACKEND_URL=http://backend:4000`) and in `k8s/base/app-configmap.yaml`
   (`BACKEND_URL=http://backend-service:4000`).
 - **Only the frontend is published to the host.** In `docker-compose.yml`,
   only `frontend` has a `ports:` mapping (`${FRONTEND_PORT:-8080}:80`).
@@ -140,7 +145,7 @@ make clean
 ### Design decisions
 
 - **StatefulSet + `volumeClaimTemplates`, not a static PV.** Postgres is a
-  `StatefulSet` (`k8s/postgres-statefulset.yaml`) with a
+  `StatefulSet` (`k8s/base/postgres-statefulset.yaml`) with a
   `volumeClaimTemplates` entry, so the controller provisions and binds its
   own PVC. A static PV/PVC pair would need manual provisioning and binding.
 - **Headless + ClusterIP Postgres services.** `postgres-headless`
@@ -161,7 +166,7 @@ make clean
   `kubectl create secret generic ... --dry-run=client -o yaml | kubectl apply -f -`.
   `k8s/app-secrets.example.yaml` is committed but holds placeholder values
   only.
-- **`PGDATA` in a subdirectory.** `postgres-statefulset.yaml` sets
+- **`PGDATA` in a subdirectory.** `k8s/base/postgres-statefulset.yaml` sets
   `PGDATA=/var/lib/postgresql/data/pgdata`, a subdirectory of the mount,
   because kind's local-path-provisioner volume root can contain a
   `lost+found` entry that makes Postgres refuse to initialize.
@@ -172,10 +177,13 @@ make clean
 
 `make ingress` installs ingress-nginx from the official kind-specific
 manifest, pinned to `controller-v1.15.1` (applied straight from that URL,
-not vendored into `k8s/`). `k8s/ingress-dev.yaml` routes host
+not vendored into `k8s/`). `k8s/base/ingress.yaml` routes host
 `node-react.local`: `/api` (Prefix) to `backend-service:4000`, `/` (Prefix)
 to `frontend-service:80`, with no `rewrite-target` annotation — so
-`/api/items` reaches the backend as `/api/items`.
+`/api/items` reaches the backend as `/api/items`. Each environment overlay
+(`k8s/overlays/{dev,preprod,release}/`) patches the host — `preprod.` and
+`release.` prefixes for those two — and sets the namespace; `dev` also
+provides the `Namespace` resource the others have their own copy of.
 
 > As of this writing, Kubernetes SIG Network has retired the community
 > ingress-nginx project (announced November 2025); best-effort maintenance

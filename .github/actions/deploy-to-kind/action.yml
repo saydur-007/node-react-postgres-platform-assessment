@@ -1,0 +1,136 @@
+name: Deploy to ephemeral kind cluster
+description: >
+  Creates a kind cluster inside the runner, installs the pinned ingress-nginx,
+  deploys one kustomize overlay with a given GHCR image tag, and smoke tests
+  it through the Ingress. Shared by the deploy and rollback jobs - the only
+  difference between them is which namespace/tag they pass in.
+
+inputs:
+  namespace:
+    description: Target namespace / overlay name (dev, preprod, release)
+    required: true
+  image-tag:
+    description: GHCR image tag to deploy
+    required: true
+  registry:
+    required: true
+  image-backend:
+    required: true
+  image-frontend:
+    required: true
+  github-actor:
+    required: true
+  github-token:
+    required: true
+  db-user:
+    required: true
+  db-password:
+    required: true
+  db-name:
+    required: true
+
+runs:
+  using: composite
+  steps:
+    # Pinned to the exact versions already verified against this repo's
+    # manifests locally (see README Prerequisites), installed the same way
+    # the Makefile already pins ingress-nginx: a direct download of a
+    # specific release, not a floating tag or a third-party Action.
+    - name: Install kind
+      shell: bash
+      run: |
+        curl -Lo /usr/local/bin/kind https://kind.sigs.k8s.io/dl/v0.30.0/kind-linux-amd64
+        chmod +x /usr/local/bin/kind
+
+    - name: Install kustomize
+      shell: bash
+      run: |
+        curl -Lo /tmp/kustomize.tar.gz \
+          https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize/v5.8.1/kustomize_v5.8.1_linux_amd64.tar.gz
+        tar -xzf /tmp/kustomize.tar.gz -C /usr/local/bin kustomize
+        chmod +x /usr/local/bin/kustomize
+
+    - name: Create kind cluster
+      shell: bash
+      run: kind create cluster --name devops-assessment --config k8s/kind-config.yaml
+
+    - name: Install ingress-nginx (pinned) and pin it to the control-plane node
+      shell: bash
+      run: make ingress
+
+    - name: Create namespace
+      shell: bash
+      run: kubectl apply -f k8s/overlays/${{ inputs.namespace }}/namespace.yaml
+
+    # CI-only: the committed manifests never mention imagePullSecrets. The
+    # pull secret is created directly in the namespace and attached to its
+    # default ServiceAccount, so every pod in it can pull from GHCR without
+    # any manifest referencing a secret name.
+    - name: Create GHCR image pull secret and attach it to the default ServiceAccount
+      shell: bash
+      run: |
+        kubectl create secret docker-registry ghcr-pull-secret \
+          -n ${{ inputs.namespace }} \
+          --docker-server=${{ inputs.registry }} \
+          --docker-username=${{ inputs.github-actor }} \
+          --docker-password=${{ inputs.github-token }} \
+          --dry-run=client -o yaml | kubectl apply -f -
+        kubectl patch serviceaccount default -n ${{ inputs.namespace }} \
+          -p '{"imagePullSecrets":[{"name":"ghcr-pull-secret"}]}'
+
+    - name: Create app secret from Actions secrets
+      shell: bash
+      run: |
+        kubectl create secret generic app-secrets \
+          -n ${{ inputs.namespace }} \
+          --from-literal=POSTGRES_USER=${{ inputs.db-user }} \
+          --from-literal=POSTGRES_PASSWORD=${{ inputs.db-password }} \
+          --from-literal=POSTGRES_DB=${{ inputs.db-name }} \
+          --from-literal=DB_WRITE_URL=postgres://${{ inputs.db-user }}:${{ inputs.db-password }}@postgres-service:5432/${{ inputs.db-name }} \
+          --from-literal=DB_READ_URL=postgres://${{ inputs.db-user }}:${{ inputs.db-password }}@postgres-service:5432/${{ inputs.db-name }} \
+          --dry-run=client -o yaml | kubectl apply -f -
+
+    # Mutates this overlay's kustomization.yaml in the runner's checkout
+    # only - never committed, never pushed. Local `make deploy` never runs
+    # this step, so backend:dev/frontend:dev stay the local image names.
+    - name: Point this overlay's images at the GHCR tag to deploy
+      shell: bash
+      working-directory: k8s/overlays/${{ inputs.namespace }}
+      run: |
+        kustomize edit set image \
+          backend:dev=${{ inputs.registry }}/${{ inputs.image-backend }}:${{ inputs.image-tag }} \
+          frontend:dev=${{ inputs.registry }}/${{ inputs.image-frontend }}:${{ inputs.image-tag }}
+
+    - name: Deploy
+      shell: bash
+      run: |
+        kubectl apply -k k8s/overlays/${{ inputs.namespace }}
+        kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=postgres -n ${{ inputs.namespace }} --timeout=120s
+        kubectl rollout status -n ${{ inputs.namespace }} deployment/backend --timeout=120s
+        kubectl rollout status -n ${{ inputs.namespace }} deployment/frontend --timeout=120s
+
+    - name: Determine ingress host for this namespace
+      id: host
+      shell: bash
+      run: |
+        if [ "${{ inputs.namespace }}" = "dev" ]; then
+          echo "host=node-react.local" >> "$GITHUB_OUTPUT"
+        else
+          echo "host=${{ inputs.namespace }}.node-react.local" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Smoke test through the ingress
+      shell: bash
+      run: |
+        echo "127.0.0.1 ${{ steps.host.outputs.host }}" | sudo tee -a /etc/hosts
+        STATUS=""
+        for i in $(seq 1 10); do
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" -H "Host: ${{ steps.host.outputs.host }}" http://localhost/api/health/ready || true)
+          [ "$STATUS" = "200" ] && break
+          sleep 3
+        done
+        if [ "$STATUS" != "200" ]; then
+          echo "Smoke test failed: /api/health/ready returned '${STATUS}'"
+          exit 1
+        fi
+        echo "Smoke test passed: /api/health/ready returned 200"

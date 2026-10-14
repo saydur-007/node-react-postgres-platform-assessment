@@ -2,7 +2,7 @@ import pg from "pg";
 
 const { Pool } = pg;
 
-function buildConnectionString() {
+export function buildConnectionString() {
   const {
     DB_USER = "appuser",
     DB_PASSWORD = "apppass",

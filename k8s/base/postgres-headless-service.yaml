@@ -1,11 +1,10 @@
 # Required by the StatefulSet as its serviceName - gives each pod a stable
-# per-ordinal DNS name (postgres-0.postgres-headless.dev.svc.cluster.local).
+# per-ordinal DNS name (postgres-0.postgres-headless.<namespace>.svc.cluster.local).
 # Not what clients should connect to; see postgres-service.yaml for that.
 apiVersion: v1
 kind: Service
 metadata:
   name: postgres-headless
-  namespace: dev
   labels:
     app.kubernetes.io/name: postgres
     app.kubernetes.io/part-of: node-react-postgres-platform

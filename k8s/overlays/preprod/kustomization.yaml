@@ -1,0 +1,19 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: preprod
+
+resources:
+  - ../../base
+  - namespace.yaml
+
+patches:
+  - path: ingress-host-patch.yaml
+    target:
+      kind: Ingress
+      name: app-ingress
+
+# No image override committed here. CI runs `kustomize edit set image`
+# against its own checkout of this overlay right before `kubectl apply -k`,
+# pointing backend:dev/frontend:dev at the ghcr.io tag it just built and
+# pushed - that edit is never committed back to the repo.
