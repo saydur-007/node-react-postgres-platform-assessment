@@ -271,7 +271,83 @@ ingress-nginx's retirement above.
 
 ## Task 4 — CI/CD & Multi-Environment Deployment
 
-TODO
+`.github/workflows/ci-cd.yml`, triggered on `push` and `pull_request`:
+
+| Branch pattern | Environment |
+|---|---|
+| `master` | `dev` |
+| `pre-release/v*` | `preprod` |
+| `release/v*` | `release` |
+
+A `pull_request` run only executes `build-and-test` — `build-and-push`,
+`deploy`, and `rollback` are all gated `if: github.event_name == 'push'`
+(or `workflow_dispatch` for `rollback`), so PRs never push an image or
+touch a cluster.
+
+**Pipeline**: `npm ci` for backend and frontend → backend syntax check
+(`node --check`) + `npm test` → frontend `vite build` → (on `push` only)
+build both images with `docker/build-push-action` + buildx, GHA layer
+cache, tag `<branch>-<short-sha>` (`tr '/' '-'` sanitizes `pre-release/v1.0`
+to `pre-release-v1.0`) → push to `ghcr.io` → deploy.
+
+**Deploy target**: an ephemeral `kind` cluster created inside the runner
+itself (`.github/actions/deploy-to-kind`), not a long-lived cluster —
+because the only cluster that exists for this assessment is `kind` on my
+own laptop, which a GitHub-hosted runner can't reach. Each deploy run
+installs the same pinned ingress-nginx, applies the target overlay with
+that run's GHCR image tag, waits for rollout, then smoke-tests
+`/api/health/ready` through the Ingress with the right `Host` header and
+fails the job on a non-200. In a real setup, the cluster would be a
+persistent one, reached via the kubeconfig of a namespace-scoped
+`ServiceAccount` stored as a secret on the matching GitHub Environment —
+not implemented here, since that cluster doesn't exist.
+
+**Secrets**: `GITHUB_TOKEN` (short-lived, repo/run-scoped) logs in to
+GHCR for both push and pull — no personal access token anywhere. `DB_USER`
+/`DB_PASSWORD`/`DB_NAME` are GitHub Actions secrets, read into the
+ephemeral cluster's `app-secrets` Secret at deploy time. The GHCR
+`imagePullSecret` is created only inside that CI run, directly in the
+target namespace, and attached to its `default` ServiceAccount — it is
+never written into any committed manifest.
+
+**GitHub Environments**: `dev`, `preprod`, `release` exist as real GitHub
+Environments (verified via `gh api .../environments`). `preprod` and
+`release` each require my manual review before a deployment proceeds, and
+each has a deployment branch policy restricting it to its matching branch
+pattern (`pre-release/v*` / `release/v*`) — confirmed live via
+`gh api .../environments/preprod/deployment-branch-policies`. `dev` has
+neither restriction.
+
+**Rollback**: `workflow_dispatch` takes `environment` + `image_tag` and
+redeploys that previously-built GHCR tag through the same ephemeral-cluster
+steps as `deploy`. Because `preprod`/`release` carry the branch policies
+above, that dispatch must itself be run from a matching branch — GitHub
+enforces it at the point the job references `environment:`, regardless of
+trigger type. This is the "precise" path. The "fast" path,
+`kubectl rollout undo -n <namespace> deployment/<name>`, only makes sense
+against a real, already-running cluster with deployment history — it isn't
+wired into this workflow since the CI cluster never has any.
+
+**Issues found**:
+- `backend/package.json`'s `node --test test/` broke on Node 22 inside the
+  `node:22-alpine` image — it tried to resolve `test/` as a CJS module
+  (`Cannot find module '/app/test'`) instead of scanning the directory.
+  Fixed by changing the script to `node --test test/*.test.js` (shell-glob
+  expansion), verified with a passing run and a deliberately-broken one
+  that correctly failed.
+- A live run on `master` (merge of the Task 4 PR) failed at the `deploy`
+  job: `chmod: changing permissions of '/usr/local/bin/kind': Operation not
+  permitted` — the hosted runner's user can write into `/usr/local/bin` but
+  not `chmod` a file there. Fixed by downloading to `/tmp`, `chmod`-ing
+  there, then `sudo mv`-ing into place, for both `kind` and `kustomize` in
+  `.github/actions/deploy-to-kind/action.yml`. **Not yet pushed** — the
+  next run on a protected branch will still hit this until this fix is
+  committed.
+
+**Evidence**: a `docs/task4-actions-run.png` screenshot is referenced by
+this plan but doesn't exist yet — every real `push`-triggered run so far
+has failed at the `deploy` step on the bug above, so there's no successful
+run to screenshot until the fix above is committed and pushed.
 
 ## Task 5 — Platform Services: Redis, Queue, Search, Read/Write DB
 

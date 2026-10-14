@@ -39,16 +39,18 @@ runs:
     - name: Install kind
       shell: bash
       run: |
-        curl -Lo /usr/local/bin/kind https://kind.sigs.k8s.io/dl/v0.30.0/kind-linux-amd64
-        chmod +x /usr/local/bin/kind
+        curl -Lo /tmp/kind https://kind.sigs.k8s.io/dl/v0.30.0/kind-linux-amd64
+        chmod +x /tmp/kind
+        sudo mv /tmp/kind /usr/local/bin/kind
 
     - name: Install kustomize
       shell: bash
       run: |
         curl -Lo /tmp/kustomize.tar.gz \
           https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize/v5.8.1/kustomize_v5.8.1_linux_amd64.tar.gz
-        tar -xzf /tmp/kustomize.tar.gz -C /usr/local/bin kustomize
-        chmod +x /usr/local/bin/kustomize
+        tar -xzf /tmp/kustomize.tar.gz -C /tmp kustomize
+        chmod +x /tmp/kustomize
+        sudo mv /tmp/kustomize /usr/local/bin/kustomize
 
     - name: Create kind cluster
       shell: bash
