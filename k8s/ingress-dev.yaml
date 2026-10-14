@@ -1,0 +1,30 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: app-ingress
+  namespace: dev
+  labels:
+    app.kubernetes.io/part-of: node-react-postgres-platform
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: node-react.local
+      http:
+        paths:
+          # No rewrite-target annotation: the controller forwards the
+          # original path unchanged, so /api/items still arrives at the
+          # backend as /api/items, matching its hardcoded /api/* routes.
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: backend-service
+                port:
+                  number: 4000
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: frontend-service
+                port:
+                  number: 80
