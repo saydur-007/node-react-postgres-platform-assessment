@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: search-service
+  labels:
+    app.kubernetes.io/name: search
+    app.kubernetes.io/part-of: node-react-postgres-platform
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: search
+  ports:
+    - port: 9200
+      targetPort: 9200

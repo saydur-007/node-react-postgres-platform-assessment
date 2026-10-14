@@ -18,3 +18,5 @@ resources:
   - redis-service.yaml
   - bullmq-worker-deployment.yaml
   - hpa-backend.yaml
+  - search-deployment.yaml
+  - search-service.yaml

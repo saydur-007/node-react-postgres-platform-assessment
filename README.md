@@ -351,13 +351,28 @@ run to screenshot until the fix above is committed and pushed.
 
 ## Task 5 — Platform Services: Redis, Queue, Search, Read/Write DB
 
-Added `redis` (`redis:7-alpine`) and `bullmq-worker` (the backend image,
-`command: node src/worker.js`) to both `docker-compose.yml` and
-`k8s/base/`. `REDIS_URL` is set on the backend, the worker, and in
-`k8s/base/app-configmap.yaml`. OpenSearch/`SEARCH_URL` was skipped under
-the time limit — `backend/src/search.js` already no-ops cleanly when
-`SEARCH_URL` is unset (confirmed in Task 1/2 testing), so nothing breaks.
-`/api/health/redis` returns `{"status":"ok"}` against the live cluster.
+Added `redis` (`redis:7-alpine`), `bullmq-worker` (the backend image,
+`command: node src/worker.js`), and `search` (`opensearchproject/opensearch:3.9.0`,
+pinned) to both `docker-compose.yml` and `k8s/base/`. `REDIS_URL` and
+`SEARCH_URL` are set on the backend and in `k8s/base/app-configmap.yaml`.
+
+**OpenSearch dev config**: `discovery.type=single-node`,
+`DISABLE_SECURITY_PLUGIN=true` (disables TLS/auth entirely — dev only,
+never outside local), `OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m`. No
+persistence (ephemeral container storage, data is disposable); memory
+requests/limits (768Mi/1Gi) sized above the 512m heap for JVM/off-heap
+overhead. Readiness probe on `/_cluster/health`. OpenSearch needs the
+host's `vm.max_map_count` at or above `262144`; on this machine it's
+already `1048576` (`cat /proc/sys/vm/max_map_count`), so no change was
+needed, but if it's too low elsewhere, raise it on the **host**, not in a
+privileged init container: `sudo sysctl -w vm.max_map_count=262144` (add
+`vm.max_map_count=262144` to a file under `/etc/sysctl.d/` for it to
+survive a reboot). This has to be the host, not the kind node container —
+it's a single kernel-wide setting, not per-container-namespaced.
+
+`/api/health/redis` and `/api/health/search` both return
+`{"status":"ok", ...}` (search: `"cluster":"green"`) against the live
+cluster, through the Ingress.
 
 **Read/write routing** lives in application code: `backend/src/db.js`
 holds two `pg.Pool` instances, `writePool` (from `DB_WRITE_URL`) and
@@ -410,11 +425,6 @@ requests without tripping on legitimate traffic.
 
 ## Not completed (time limit)
 
-- **OpenSearch**: add `search-deployment.yaml`/`search-service.yaml`
-  (single-node dev mode, same pattern as `redis-deployment.yaml`), set
-  `SEARCH_URL=http://search-service:9200`. `backend/src/search.js` already
-  has the health-check code; it would just start reporting real status
-  instead of being unset.
 - **Prometheus + Grafana**: deploy Prometheus with a scrape config
   targeting pods annotated `prometheus.io/scrape: "true"`; annotate the
   backend Deployment accordingly. Add Grafana pointed at that Prometheus,

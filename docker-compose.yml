@@ -23,6 +23,7 @@ services:
       DB_WRITE_URL: postgres://${DB_USER}:${DB_PASSWORD}@postgres:5432/${DB_NAME}
       DB_READ_URL: postgres://${DB_USER}:${DB_PASSWORD}@postgres:5432/${DB_NAME}
       REDIS_URL: redis://redis:6379
+      SEARCH_URL: http://opensearch:9200
     expose:
       - "4000"
     depends_on:
@@ -49,6 +50,17 @@ services:
       REDIS_URL: redis://redis:6379
     depends_on:
       - redis
+
+  # Dev only: security plugin disabled (no TLS/auth) and no volume (data is
+  # disposable) - see k8s/base/search-deployment.yaml for the same setup.
+  opensearch:
+    image: opensearchproject/opensearch:3.9.0
+    environment:
+      discovery.type: single-node
+      DISABLE_SECURITY_PLUGIN: "true"
+      OPENSEARCH_JAVA_OPTS: "-Xms512m -Xmx512m"
+    expose:
+      - "9200"
 
   frontend:
     build:

@@ -12,3 +12,4 @@ data:
   # the Compose service name.
   BACKEND_URL: "http://backend-service:4000"
   REDIS_URL: "redis://redis-service:6379"
+  SEARCH_URL: "http://search-service:9200"
