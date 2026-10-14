@@ -1,199 +1,236 @@
-# Node + React + Postgres — Production-Style Local Platform
+# Node + React + Postgres Platform
 
-A simple full-stack app (React + Node.js/Express + PostgreSQL) taken through
-six stages: containerization, Kubernetes, Ingress/API gateway, CI/CD,
-platform services (Redis/queue/search + simulated read/write DB), and
-observability/scaling.
+A small full-stack app (React frontend, Express backend, PostgreSQL) used as
+a DevOps take-home assessment. It is built up in stages: local containers
+first, then a local Kubernetes cluster, then (planned) Ingress, CI/CD,
+platform services, and observability.
 
 ## Repo structure
 
 ```
 .
-├── backend/                  # Express API + BullMQ worker
-├── frontend/                 # React (Vite) app
-├── 
-├── 
-├── 
-├── 
-├── k8s/                      # Namespaces, Deployments, Services, Ingress
-├── observability/            # Prometheus, Grafana, Fluent Bit, Loki, HPA
+├── backend/
+│   ├── src/                  # Express API (index.js), db.js, redisClient.js,
+│   │                         # queue.js, worker.js, search.js
+│   └── .env.example          # env vars for running the backend without Docker
+├── frontend/
+│   ├── src/                  # React app (App.jsx, main.jsx)
+│   ├── nginx.conf.template   # envsubst'd into nginx's config at container start
+│   └── vite.config.js
+├── k8s/                      # namespace, configmap, secret example, postgres
+│                             # StatefulSet + services, backend/frontend
+│                             # Deployments + services, kind cluster config,
+│                             # ingress (Task 3, not yet documented below)
+├── docs/                     # evidence screenshots
+├── docker-compose.yml
+├── Dockerfile.backend
+├── Dockerfile.frontend
+├── .dockerignore
+├── .env.example               # docker-compose / Makefile env vars
+├── Makefile                   # kind cluster + kubectl bring-up targets
 └── .github/workflows/ci-cd.yml
+```
+
+## Prerequisites
+
+Versions this was built and tested against:
+
+```
+$ docker --version
+Docker version 29.9.0, build f415da8
+
+$ kind version
+kind v0.30.0 go1.24.6 linux/amd64
+
+$ kubectl version --client
+Client Version: v1.37.0
+Kustomize Version: v5.8.1
+
+$ make --version
+GNU Make 4.3
 ```
 
 ---
 
-## Task 1 — Local Docker Compose
+## Task 1 — Docker Compose
 
 ```bash
-docker compose up --build
+cp .env.example .env
+docker compose up --build -d
 ```
 
-- Frontend: http://localhost:8080
-- Backend:  http://localhost:4000/api/health
-- Postgres: localhost:5432 (persisted in the `postgres_data` volume)
+Open http://localhost:8080.
 
-Both Dockerfiles use multi-stage builds (deps/build stage discarded, only
-`node_modules` + source or the compiled static bundle ship in the final
-image). No secrets are hardcoded — DB/Redis/search connection info comes from
-environment variables (see `docker-compose.yml` and `backend/.env.example`).
-
-## Task 2 — Kubernetes
-
-Requires a local cluster (`kind` or `minikube`) with images built and loaded
-(or pushed to a registry the cluster can pull from):
+Reset the database (drops the named volume):
 
 ```bash
-kubectl apply -f k8s/namespace-dev.yaml
-kubectl apply -n dev -f k8s/
+docker compose down -v
 ```
 
-- `dev` namespace holds everything.
-- `backend-service` / `postgres-service` are `ClusterIP` — internal only.
-- `frontend-service` is `NodePort` (30080) for direct access; Task 3 adds
-  Ingress on top for a friendlier path.
-- Postgres uses a `PersistentVolumeClaim` bound to a `hostPath` PV so data
-  survives pod restarts.
-- `backend` has `readinessProbe`/`livenessProbe` hitting `/api/health/ready`
-  and `/api/health/live` respectively — readiness checks the DB is
-  reachable, liveness only checks the process is up (so a slow DB doesn't
-  cause pointless container restarts).
+### Design decisions
+
+- **Multi-stage builds.** `Dockerfile.backend` separates a `deps` stage
+  (`npm ci --omit=dev`) from the `runtime` stage, which only copies in
+  `node_modules` and `src/`. `Dockerfile.frontend` separates the Vite
+  `build` stage from the `nginx:1.27-alpine` runtime stage, so no Node
+  toolchain ships in the final image.
+- **Non-root backend.** `Dockerfile.backend` runs as the `node` user that
+  `node:22-alpine` already ships with, not root.
+- **nginx `/api` proxy via `BACKEND_URL` template.**
+  `frontend/nginx.conf.template` is rendered by nginx's built-in
+  `envsubst`-on-templates mechanism at container start. Its `/api/`
+  location does `proxy_pass ${BACKEND_URL};` with no trailing slash, so a
+  request to `/api/items` is forwarded as `/api/items`, preserving the
+  prefix the backend's routes expect. The same image is used in
+  `docker-compose.yml` (`BACKEND_URL=http://backend:4000`) and in
+  `k8s/app-configmap.yaml` (`BACKEND_URL=http://backend-service:4000`).
+- **Only the frontend is published to the host.** In `docker-compose.yml`,
+  only the `frontend` service has a `ports:` mapping
+  (`${FRONTEND_PORT:-8080}:80`). `postgres` and `backend` have no host port
+  mapping, so they're reachable only on the Compose network.
+- **Healthcheck on `/api/health/ready`, not `/api/health`.** The backend's
+  Compose healthcheck calls `/api/health/ready`, which checks Postgres is
+  reachable, instead of `/api/health`, which always returns `200`. This
+  stops Compose from calling the container healthy before it can actually
+  serve `/api/items`.
+
+---
+
+## Task 2 — Kubernetes (kind)
+
+```bash
+make cluster images secrets deploy
+```
+
+Open http://localhost:30080.
+
+> This documents Task 2 as it stood when merged. The `task-3-ingress`
+> branch changes `frontend-service` to `ClusterIP` and moves external
+> access behind an Ingress instead — not covered in this README section.
+
+Rebuild and roll out a code change:
+
+```bash
+make redeploy
+```
+
+`redeploy` exists because the image tag is always `backend:dev`/`frontend:dev`
+and both Deployments use `imagePullPolicy: IfNotPresent`. After `make images`
+rebuilds and reloads the image into the kind nodes, a plain re-`apply` of the
+Deployment is a no-op (the tag didn't change, so kubelet doesn't re-pull).
+`make redeploy` rebuilds, reloads, then runs `kubectl rollout restart` on both
+Deployments to force the new image in.
+
+Tear the cluster down:
+
+```bash
+make clean
+```
+
+### Design decisions
+
+- **StatefulSet + `volumeClaimTemplates`, not a static PV.** Postgres is a
+  `StatefulSet` (`k8s/postgres-statefulset.yaml`) with a
+  `volumeClaimTemplates` entry, so the controller provisions and binds its
+  own PVC automatically; a static PV/PVC pair would have to be created and
+  matched by hand.
+- **Headless + ClusterIP Postgres services.** `postgres-headless`
+  (`clusterIP: None`) exists only because the StatefulSet requires a
+  `serviceName`. `DB_WRITE_URL`/`DB_READ_URL` point at the separate
+  `postgres-service` (`ClusterIP`), per the assessment's requirement that
+  Postgres be reachable via a ClusterIP service.
+- **Separate liveness/readiness endpoints.** The backend's `livenessProbe`
+  hits `/api/health/live` (process check only); its `readinessProbe` hits
+  `/api/health/ready` (checks Postgres). A Postgres outage pulls the pod out
+  of Service rotation without restarting it.
+- **CPU/memory `requests`/`limits` set now.** Backend, frontend, and
+  Postgres all declare `resources.requests`/`limits` (e.g. backend:
+  `100m`/`128Mi` requests, `500m`/`256Mi` limits), because a future HPA
+  computes CPU/memory percentage against `requests`.
+- **Secret created from `.env`, never committed.** `make secrets` builds the
+  `app-secrets` Secret from the root `.env` via
+  `kubectl create secret generic ... --dry-run=client -o yaml | kubectl apply -f -`.
+  `k8s/app-secrets.example.yaml` is committed but holds placeholder values
+  only.
+- **`PGDATA` in a subdirectory.** `postgres-statefulset.yaml` sets
+  `PGDATA=/var/lib/postgresql/data/pgdata`, a subdirectory of the mount,
+  because kind's local-path-provisioner volume root can contain a
+  `lost+found` entry that makes Postgres refuse to initialize.
+
+---
+
+## Issue found during testing
+
+Deleting the Postgres pod (`kubectl delete pod -n dev postgres-0`) to test
+persistence crashed the backend:
+
+- **Symptom:** `kubectl get pods -n dev` showed both backend pods at
+  `RESTARTS: 2` shortly after the postgres pod was deleted.
+- **Diagnosis:** `kubectl logs <backend-pod> --previous` showed:
+  ```
+  failed to initialize schema: Error: connect ECONNREFUSED ...
+      at async initSchema (file:///app/src/db.js:30:3)
+  ```
+  The container had actually crashed and restarted — not just failed a
+  readiness check — and on restart it reran `initSchema()` against a
+  Postgres that wasn't back up yet, failing again.
+- **Root cause:** `backend/src/db.js`'s `writePool`/`readPool` (`pg.Pool`
+  instances) had no `.on("error", ...)` handler. When an idle pooled
+  connection breaks, `pg.Pool` emits an `'error'` event; with no listener,
+  Node treats that as an uncaught exception and crashes the process.
+- **Fix:** added `writePool.on("error", ...)` and
+  `readPool.on("error", ...)` in `backend/src/db.js` (the same pattern
+  already used in `backend/src/redisClient.js`).
+- **Re-test:** after `make redeploy`, deleted `postgres-0` again and polled
+  `kubectl get pods -n dev` for about 40 seconds. Both backend pods stayed
+  at `RESTARTS: 0`. `GET /api/items` through the NodePort still returned the
+  item created before the test once Postgres was ready again.
+
+---
+
+## Known limitations
+
+- `backend/src/db.js`'s `buildConnectionString()` has hardcoded fallback
+  credentials (`appuser`/`apppass`/`localhost`/`5432`/`appdb`), used only if
+  `DB_WRITE_URL`/`DB_READ_URL` aren't set. Both `docker-compose.yml` and
+  `k8s/` always set those, so this fallback path isn't exercised today.
+- `backend/package.json`'s `test` script is `node --test test/ || true` —
+  the `|| true` means the script always exits `0`, so a real test failure
+  wouldn't fail a CI step that runs it.
+- The backend logs repeated `redis connection error` messages in both
+  Compose and kind, because `backend/src/redisClient.js` and
+  `backend/src/queue.js` always try to connect to `REDIS_URL` (default
+  `redis://localhost:6379`), and no Redis container exists yet in either
+  `docker-compose.yml` or `k8s/` (planned for Task 5). This is expected
+  noise, not a bug.
+
+---
+
+## Evidence
+
+- [docs/task2-kubectl-get-all.png](docs/task2-kubectl-get-all.png) —
+  `kubectl get all -n dev` output for Task 2.
+- [docs/task3-ingress-controller.png](docs/task3-ingress-controller.png) —
+  the ingress-nginx controller pod scheduling issue: it first landed on a
+  worker node, where the `kind-config.yaml` 80/443 `hostPort` mappings
+  (control-plane only) couldn't reach it. Fixed with a `kubectl patch` in
+  `make ingress` pinning the controller's `nodeSelector` to
+  `ingress-ready: "true"`.
+
+---
 
 ## Task 3 — Ingress / API Gateway
 
-```bash
-# example for kind: install nginx-ingress, then
-echo "127.0.0.1 node-react.local" | sudo tee -a /etc/hosts
-kubectl apply -n dev -f k8s/ingress-dev.yaml
-```
 
-**Request path:** `Browser → Ingress → Service → Pod → PostgreSQL`
-1. Browser resolves `node-react.local` to the ingress controller's IP (via
-   `/etc/hosts` locally, or real DNS in prod).
-2. The Ingress controller matches the path: `/api` or `/api/*` →
-   `backend-service`; everything else → `frontend-service`.
-3. The Service load-balances across matching pods via `kube-proxy` (or an
-   eBPF equivalent).
-4. The backend Pod talks to Postgres via `postgres-service`.
-
-**Kubernetes DNS:** every Service gets a stable DNS name of the form
-`<service>.<namespace>.svc.cluster.local` — e.g. `backend-service.dev.svc.
-cluster.local`. Pods use this name instead of an IP because pod IPs change
-on every restart/reschedule; the Service is the stable, load-balanced front
-door.
-
-**Debugging:**
-- *Ingress reachable but backend is not:* check `kubectl get endpoints
-  backend-service -n dev` — empty means the Service's label selector isn't
-  matching any Ready pod. Then check backend pod logs and its readiness
-  probe status.
-- *Frontend can't reach backend:* confirm `VITE_API_BASE_URL` was baked in
-  correctly at build time, that the browser's requests are going to `/api/*`
-  (not `http://backend-service:4000` — that hostname only resolves inside
-  the cluster, not from the browser), and check the Ingress controller logs
-  for a 404/502 on that path.
-
-**Evolving to microservices:** the Ingress already acts as a lightweight API
-gateway routing by path prefix. Splitting the backend into multiple services
-(e.g. `users-service`, `orders-service`) just means adding more path rules
-(`/api/users`, `/api/orders`, …) pointing at more ClusterIP Services — the
-Ingress, DNS, and probe patterns established here don't change.
 
 ## Task 4 — CI/CD & Multi-Environment Deployment
 
-`.github/workflows/ci-cd.yml` triggers on push to:
 
-| Branch pattern      | Target namespace |
-|----------------------|-------------------|
-| `master`             | `dev`             |
-| `pre-release/v*`     | `preprod`         |
-| `release/v*`         | `release`         |
-
-Pipeline: install deps → build/validate both services → build Docker images
-→ tag as `<branch>-<short-sha>` → push to GHCR → `sed`-patch the k8s
-manifests with the new image tag and target namespace → `kubectl apply`.
-
-**Secrets:** the registry push uses the ephemeral, repo-scoped
-`GITHUB_TOKEN` — no long-lived registry credentials are stored. Cluster
-access uses a base64-encoded kubeconfig stored as an encrypted Actions
-secret (`KUBECONFIG_B64`), scoped to a service account limited to the
-target namespace(s).
-
-**Rollback:** two options, both included —
-1. **Fast:** `kubectl rollout undo deployment/<name> -n <namespace>` (wired
-   up as a manual `workflow_dispatch` job in the pipeline) — reverts to the
-   previous ReplicaSet immediately.
-2. **Precise:** re-run the pipeline against the previous commit/tag, which
-   rebuilds and redeploys that exact known-good image — slower, but
-   guarantees you're not relying on a ReplicaSet Kubernetes hasn't garbage
-   collected yet.
 
 ## Task 5 — Platform Services: Redis, Queue, Search, Read/Write DB
 
-Added to both `docker-compose.yml` and `k8s/`:
-- **Redis** (`redis-deployment.yaml` / `redis-service.yaml`) — the backend
-  connects via `REDIS_URL` (`backend/src/redisClient.js`) and exposes
-  `/api/health/redis`.
-- **Queue** (`bullmq-worker-deployment.yaml`) — BullMQ over Redis. Every
-  `POST /api/items` enqueues an `item-created` job (`backend/src/queue.js`);
-  a separate worker process (`backend/src/worker.js`, same image, different
-  `command:`) consumes it. Decoupling the worker into its own Deployment
-  means it scales and fails independently of the API.
-- **Search** (`search-deployment.yaml` / `search-service.yaml`) — OpenSearch
-  in single-node dev mode. The backend only does a health call today
-  (`backend/src/search.js`, `/api/health/search`) — real indexing would hook
-  into the same queue consumer.
 
-**Simulated read/write DB cluster:** `backend/src/db.js` holds two separate
-`pg.Pool` instances — `writePool` from `DB_WRITE_URL`, `readPool` from
-`DB_READ_URL`. `write()` (INSERT/UPDATE/DELETE) always uses `writePool`;
-`read()` (SELECT) uses `readPool`. Locally both env vars point at the same
-Postgres instance, but the code already treats them as separate targets, so
-pointing `DB_READ_URL` at a real replica later is a one-line config change —
-no application code changes.
-
-**Where routing logic lives:** in this repo it's explicit in application
-code (`write()` vs `read()` helpers). The alternative is a DB proxy
-(PgBouncer, ProxySQL, or a cloud-managed read/write splitter) that makes
-routing transparent to the app — simpler application code, but another
-component to operate and one more hop of latency.
-
-**Replication lag:** a replica can be milliseconds to seconds behind the
-primary. Anything that reads its own recent write — "did my update save?",
-a redirect-after-POST that re-fetches the record, uniqueness checks before
-an insert — must hit the writer/primary, not a replica, or it risks reading
-stale data and behaving as if the write never happened.
 
 ## Task 6 — Observability, Scaling & Rate Limiting
 
-`observability/`:
-- **Prometheus** (`prometheus.yaml`) scrapes any pod annotated
-  `prometheus.io/scrape: "true"` (the backend Deployment is annotated
-  accordingly) in the `dev` namespace.
-- **Grafana** (`grafana.yaml`) for dashboards on: backend CPU usage, backend
-  memory usage, request rate & error rate, and replica count over time.
-- **Fluent Bit** (`fluentbit-daemonset.yaml`) runs as a `DaemonSet` (one per
-  node, so it picks up every pod's logs on that node regardless of which
-  pods get scheduled where) and ships backend logs to **Loki**
-  (`loki.yaml`).
-- **HPA** (`hpa-backend.yaml`) scales the backend Deployment 2→6 replicas on
-  CPU (70%) or memory (80%) utilization.
 
-**What to alert on, and why:**
-- **High error rate** (5xx / total requests) — the most direct signal
-  something is actually broken for users, independent of load level.
-- **High CPU / at max HPA replicas** — means the autoscaler is out of
-  headroom; the next symptom is queueing and latency, not just slow scaling.
-- **High p95/p99 latency** — catches degradation (slow queries, GC pauses,
-  a struggling dependency) that error-rate and CPU alone can miss.
-- **Sustained high request rate** without a matching replica increase —
-  usually indicates the HPA is misconfigured or capped, not that traffic is
-  fine.
-
-**Verifying logs:** `kubectl logs -n dev daemonset/fluent-bit` to confirm
-Fluent Bit is running and tailing files, then query Loki (via Grafana's
-Explore view, `{job="backend"}`) to confirm entries are actually arriving
-and are searchable/filterable by label.
-# node-react-postgres-platform
-# node-react-postgres-platform
-# node-react-postgres-platform
-# node-react-postgres-platform
