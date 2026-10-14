@@ -1,5 +1,3 @@
-# syntax=docker/dockerfile:1
-
 # ---- build: compile the Vite app to static assets ----
 FROM node:22-alpine AS build
 WORKDIR /app
@@ -9,7 +7,7 @@ COPY frontend/ ./
 RUN npm run build
 
 # ---- runtime: serve dist/ via nginx, proxy /api/ to the backend ----
-FROM nginx:alpine AS runtime
+FROM nginx:1.27-alpine AS runtime
 COPY --from=build /app/dist /usr/share/nginx/html
 COPY frontend/nginx.conf.template /etc/nginx/templates/default.conf.template
 EXPOSE 80

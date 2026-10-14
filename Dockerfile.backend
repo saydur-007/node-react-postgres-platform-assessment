@@ -1,5 +1,3 @@
-# syntax=docker/dockerfile:1
-
 # ---- deps: install production dependencies only ----
 FROM node:22-alpine AS deps
 WORKDIR /app
