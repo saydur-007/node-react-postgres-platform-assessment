@@ -1,0 +1,73 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+  namespace: dev
+  labels:
+    app.kubernetes.io/name: backend
+    app.kubernetes.io/part-of: node-react-postgres-platform
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: backend
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: backend
+        app.kubernetes.io/part-of: node-react-postgres-platform
+    spec:
+      containers:
+        - name: backend
+          image: backend:dev
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 4000
+          env:
+            - name: PORT
+              valueFrom:
+                configMapKeyRef:
+                  name: app-config
+                  key: PORT
+            - name: NODE_ENV
+              valueFrom:
+                configMapKeyRef:
+                  name: app-config
+                  key: NODE_ENV
+            - name: DB_WRITE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: app-secrets
+                  key: DB_WRITE_URL
+            - name: DB_READ_URL
+              valueFrom:
+                secretKeyRef:
+                  name: app-secrets
+                  key: DB_READ_URL
+          # Liveness only checks the process is up - a slow/unreachable DB
+          # must not cause a restart loop that can never fix the DB.
+          livenessProbe:
+            httpGet:
+              path: /api/health/live
+              port: 4000
+            initialDelaySeconds: 15
+            periodSeconds: 15
+            timeoutSeconds: 3
+            failureThreshold: 3
+          # Readiness checks the DB is reachable - gates traffic without
+          # restarting the pod.
+          readinessProbe:
+            httpGet:
+              path: /api/health/ready
+              port: 4000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
