@@ -10,7 +10,13 @@ export
 INGRESS_NGINX_VERSION := controller-v1.15.1
 INGRESS_NGINX_MANIFEST := https://raw.githubusercontent.com/kubernetes/ingress-nginx/$(INGRESS_NGINX_VERSION)/deploy/static/provider/kind/deploy.yaml
 
-.PHONY: cluster ingress images secrets deploy redeploy status clean
+METRICS_SERVER_VERSION := v0.9.0
+METRICS_SERVER_MANIFEST := https://github.com/kubernetes-sigs/metrics-server/releases/download/$(METRICS_SERVER_VERSION)/components.yaml
+
+MONITORING_NAMESPACE := monitoring
+KUBE_PROMETHEUS_STACK_VERSION := 91.8.2
+
+.PHONY: cluster ingress metrics observability images secrets deploy redeploy status clean
 
 # Usage: make cluster ingress images secrets deploy
 cluster:
@@ -28,10 +34,55 @@ ingress:
 	# there explicitly instead of relying on scheduler luck.
 	kubectl patch deployment ingress-nginx-controller -n ingress-nginx \
 		--type merge -p '{"spec":{"template":{"spec":{"nodeSelector":{"ingress-ready":"true"}}}}}'
+	# This manifest doesn't pass --enable-metrics, so the controller never
+	# exposes nginx_ingress_controller_* on :10254 (verified live: with the
+	# flag unset, /metrics has only Go runtime metrics, nothing
+	# ingress-specific). Needed for Task 6's ingress-nginx ServiceMonitor.
+	kubectl get deployment ingress-nginx-controller -n ingress-nginx \
+		-o jsonpath='{.spec.template.spec.containers[0].args}' | grep -q -- '--enable-metrics=true' || \
+		kubectl patch deployment ingress-nginx-controller -n ingress-nginx \
+			--type json -p '[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--enable-metrics=true"}]'
 	kubectl wait --namespace ingress-nginx \
 		--for=condition=ready pod \
 		--selector=app.kubernetes.io/component=controller \
 		--timeout=180s
+
+# kind's kubelets serve their metrics endpoint with a self-signed
+# certificate that isn't in metrics-server's trusted CA bundle - no real
+# cluster CA issued it, kind doesn't set one up for this purpose. Every
+# kind + metrics-server guide requires this flag for that reason; it only
+# weakens the metrics-server -> kubelet leg inside the cluster, nothing
+# external.
+metrics:
+	kubectl apply -f $(METRICS_SERVER_MANIFEST)
+	kubectl get deployment metrics-server -n kube-system \
+		-o jsonpath='{.spec.template.spec.containers[0].args}' | grep -q -- '--kubelet-insecure-tls' || \
+		kubectl patch deployment metrics-server -n kube-system \
+			--type json -p '[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--kubelet-insecure-tls"}]'
+	kubectl wait --namespace kube-system \
+		--for=condition=available deployment/metrics-server --timeout=120s
+
+# kube-prometheus-stack (Prometheus, Alertmanager, Grafana, kube-state-metrics,
+# node-exporter) via Helm, pinned chart version, into its own "monitoring"
+# namespace - deliberately outside k8s/base and k8s/overlays, so CI's
+# `kubectl apply -k` never deploys or manages any of this.
+observability:
+	kubectl create namespace $(MONITORING_NAMESPACE) --dry-run=client -o yaml | kubectl apply -f -
+	kubectl create secret generic grafana-admin-secret \
+		-n $(MONITORING_NAMESPACE) \
+		--from-literal=admin-user=admin \
+		--from-literal=admin-password=$(GRAFANA_ADMIN_PASSWORD) \
+		--dry-run=client -o yaml | kubectl apply -f -
+	helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+	helm repo update prometheus-community
+	helm upgrade --install kube-prometheus-stack prometheus-community/kube-prometheus-stack \
+		--version $(KUBE_PROMETHEUS_STACK_VERSION) \
+		--namespace $(MONITORING_NAMESPACE) \
+		--values observability/prometheus-values.yaml \
+		--wait --timeout 5m
+	kubectl apply -f observability/ingress-metrics.yaml
+	kubectl apply -f observability/dashboard-backend.yaml
+	kubectl apply -f observability/alerts.yaml
 
 images:
 	docker build -f Dockerfile.backend -t backend:dev .

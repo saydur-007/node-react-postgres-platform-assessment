@@ -1,0 +1,109 @@
+# Picked up by the Grafana sidecar (grafana.sidecar.dashboards, enabled in
+# prometheus-values.yaml) via the grafana_dashboard=1 label. Must live in
+# the same namespace as Grafana itself (monitoring) - the sidecar's
+# default searchNamespace is its own namespace, not cluster-wide.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: backend-dashboard
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/part-of: node-react-postgres-platform
+    grafana_dashboard: "1"
+data:
+  backend-dashboard.json: |
+    {
+      "title": "Backend",
+      "uid": "backend-overview",
+      "schemaVersion": 39,
+      "timezone": "browser",
+      "time": { "from": "now-1h", "to": "now" },
+      "refresh": "15s",
+      "panels": [
+        {
+          "id": 1,
+          "title": "Backend CPU usage",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "targets": [
+            {
+              "expr": "sum(rate(container_cpu_usage_seconds_total{namespace=\"dev\",pod=~\"backend-.*\",container=\"backend\"}[5m])) by (pod)",
+              "legendFormat": "{{pod}}"
+            }
+          ]
+        },
+        {
+          "id": 2,
+          "title": "Backend memory usage",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "fieldConfig": { "defaults": { "unit": "bytes" }, "overrides": [] },
+          "targets": [
+            {
+              "expr": "sum(container_memory_working_set_bytes{namespace=\"dev\",pod=~\"backend-.*\",container=\"backend\"}) by (pod)",
+              "legendFormat": "{{pod}}"
+            }
+          ]
+        },
+        {
+          "id": 3,
+          "title": "Request rate (backend-service, via Ingress)",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "targets": [
+            {
+              "expr": "sum(rate(nginx_ingress_controller_requests{service=\"backend-service\"}[5m]))",
+              "legendFormat": "req/s"
+            }
+          ]
+        },
+        {
+          "id": 4,
+          "title": "Error rate (5xx %, backend-service)",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "fieldConfig": { "defaults": { "unit": "percent", "max": 100, "min": 0 }, "overrides": [] },
+          "targets": [
+            {
+              "expr": "100 * (sum(rate(nginx_ingress_controller_requests{service=\"backend-service\",status=~\"5..\"}[5m])) or vector(0)) / sum(rate(nginx_ingress_controller_requests{service=\"backend-service\"}[5m]))",
+              "legendFormat": "5xx %"
+            }
+          ]
+        },
+        {
+          "id": 5,
+          "title": "p95 latency (backend-service, via Ingress)",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+          "targets": [
+            {
+              "expr": "histogram_quantile(0.95, sum(rate(nginx_ingress_controller_request_duration_seconds_bucket{service=\"backend-service\"}[5m])) by (le))",
+              "legendFormat": "p95"
+            }
+          ]
+        },
+        {
+          "id": 6,
+          "title": "Backend replicas over time",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "targets": [
+            {
+              "expr": "kube_deployment_status_replicas{namespace=\"dev\",deployment=\"backend\"}",
+              "legendFormat": "actual"
+            },
+            {
+              "expr": "kube_horizontalpodautoscaler_status_desired_replicas{namespace=\"dev\",horizontalpodautoscaler=\"backend\"}",
+              "legendFormat": "hpa desired"
+            }
+          ]
+        }
+      ]
+    }

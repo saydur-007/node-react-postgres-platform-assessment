@@ -1,0 +1,103 @@
+# Helm values for prometheus-community/kube-prometheus-stack, pinned to
+# chart 91.8.2 (app v0.94.1) - see the "observability" Makefile target.
+# Installed into the "monitoring" namespace, outside k8s/base and
+# k8s/overlays, so `kubectl apply -k` (what CI runs) never touches any of
+# this.
+
+prometheus:
+  prometheusSpec:
+    # Dev-only laptop setup: short retention, and no storageSpec means the
+    # Prometheus Operator falls back to an emptyDir - data is lost on pod
+    # restart. Unlike Postgres, nothing here needs to survive one.
+    retention: 6h
+    # Without these three, Prometheus only watches ServiceMonitors/
+    # PodMonitors/PrometheusRules carrying this release's Helm label. Our
+    # own ingress-nginx ServiceMonitor and alerts.yaml don't have it, so
+    # without this they'd be silently ignored.
+    ruleSelectorNilUsesHelmValues: false
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+
+alertmanager:
+  alertmanagerSpec:
+    resources:
+      requests:
+        cpu: 25m
+        memory: 32Mi
+      limits:
+        cpu: 100m
+        memory: 64Mi
+
+prometheusOperator:
+  resources:
+    requests:
+      cpu: 25m
+      memory: 64Mi
+    limits:
+      cpu: 100m
+      memory: 128Mi
+
+kube-state-metrics:
+  resources:
+    requests:
+      cpu: 20m
+      memory: 32Mi
+    limits:
+      cpu: 100m
+      memory: 64Mi
+
+# DaemonSet - runs on all 3 kind nodes, keep each instance tiny.
+prometheus-node-exporter:
+  resources:
+    requests:
+      cpu: 10m
+      memory: 16Mi
+    limits:
+      cpu: 50m
+      memory: 32Mi
+
+grafana:
+  resources:
+    requests:
+      cpu: 50m
+      # 128Mi OOMKilled the grafana container 3 times (confirmed via
+      # containerStatuses: grafana restartCount=3, lastState=OOMKilled;
+      # both sidecars at 0 restarts - this is specifically the grafana
+      # container's own limit, not the sidecars) during the Task 6 HPA
+      # load test.
+      memory: 256Mi
+    limits:
+      cpu: 200m
+      memory: 512Mi
+
+  # No persistence.enabled here - stays at the chart default (false).
+  # Dashboards live in dashboard-backend.yaml (a ConfigMap, already
+  # version-controlled); losing Grafana's own state on restart costs
+  # nothing we care about here.
+
+  admin:
+    # Created by `make observability` from .env's GRAFANA_ADMIN_PASSWORD -
+    # never a plaintext value in this file.
+    existingSecret: grafana-admin-secret
+    userKey: admin-user
+    passwordKey: admin-password
+
+  ingress:
+    enabled: true
+    ingressClassName: nginx
+    hosts:
+      - grafana.node-react.local
+    path: /
+
+  sidecar:
+    dashboards:
+      enabled: true
+      label: grafana_dashboard
+      labelValue: "1"

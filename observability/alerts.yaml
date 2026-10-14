@@ -1,0 +1,84 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: app-alerts
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/part-of: node-react-postgres-platform
+spec:
+  groups:
+    - name: app.rules
+      rules:
+        - alert: BackendHighErrorRate
+          expr: |
+            sum(rate(nginx_ingress_controller_requests{service="backend-service",status=~"5.."}[5m]))
+            /
+            sum(rate(nginx_ingress_controller_requests{service="backend-service"}[5m]))
+            > 0.05
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Backend 5xx rate above 5% for 5m"
+            description: "More than 5% of requests to backend-service through the Ingress are 5xx, sustained for 5 minutes."
+
+        - alert: BackendHighP95Latency
+          expr: |
+            histogram_quantile(0.95,
+              sum(rate(nginx_ingress_controller_request_duration_seconds_bucket{service="backend-service"}[5m])) by (le)
+            ) > 1
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Backend p95 latency above 1s for 5m"
+            description: "p95 request duration through the Ingress for backend-service has been above 1 second for 5 minutes."
+
+        - alert: BackendCPUNearLimit
+          expr: |
+            sum(rate(container_cpu_usage_seconds_total{namespace="dev",pod=~"backend-.*",container="backend"}[5m])) by (pod)
+            /
+            sum(kube_pod_container_resource_limits{namespace="dev",pod=~"backend-.*",container="backend",resource="cpu"}) by (pod)
+            > 0.9
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Backend pod CPU above 90% of its limit for 10m"
+            description: "{{ $labels.pod }} has used over 90% of its CPU limit for 10 minutes - close to throttling."
+
+        - alert: BackendHPAAtMaxReplicas
+          expr: |
+            kube_horizontalpodautoscaler_status_current_replicas{namespace="dev",horizontalpodautoscaler="backend"}
+            >=
+            kube_horizontalpodautoscaler_spec_max_replicas{namespace="dev",horizontalpodautoscaler="backend"}
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Backend HPA at max replicas for 10m"
+            description: "The backend HPA has been at its max replica count for 10 minutes - the autoscaler is out of headroom."
+
+        - alert: BackendPodsNotReady
+          expr: |
+            kube_deployment_status_replicas_available{namespace="dev",deployment="backend"}
+            <
+            kube_deployment_spec_replicas{namespace="dev",deployment="backend"}
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Backend has fewer available replicas than desired"
+            description: "backend Deployment in dev has had fewer available replicas than its spec for 5 minutes."
+
+        - alert: PostgresDown
+          expr: |
+            kube_statefulset_status_replicas_ready{namespace="dev",statefulset="postgres"}
+            <
+            kube_statefulset_status_replicas{namespace="dev",statefulset="postgres"}
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Postgres StatefulSet not fully ready"
+            description: "postgres StatefulSet in dev has had fewer ready replicas than its spec for 2 minutes - single replica, so this is a hard outage, not degraded service."

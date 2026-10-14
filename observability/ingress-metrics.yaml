@@ -1,0 +1,43 @@
+# Exposes the ingress-nginx controller's :10254 metrics port as a Service,
+# then a ServiceMonitor so kube-prometheus-stack's Prometheus scrapes it.
+# Needs `--enable-metrics=true` on the controller (added by `make ingress`)
+# - without it, 10254 serves Go runtime metrics only, no nginx_ingress_*
+# metrics at all (verified live before adding that flag).
+apiVersion: v1
+kind: Service
+metadata:
+  name: ingress-nginx-controller-metrics
+  namespace: ingress-nginx
+  labels:
+    app.kubernetes.io/name: ingress-nginx
+    app.kubernetes.io/part-of: node-react-postgres-platform
+spec:
+  selector:
+    app.kubernetes.io/component: controller
+  ports:
+    - name: metrics
+      port: 10254
+      targetPort: 10254
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: ingress-nginx-controller
+  namespace: ingress-nginx
+  labels:
+    app.kubernetes.io/name: ingress-nginx
+    app.kubernetes.io/part-of: node-react-postgres-platform
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ingress-nginx
+  endpoints:
+    - port: metrics
+      interval: 15s
+      # Without this, Prometheus's own target labels (namespace=ingress-nginx,
+      # service=ingress-nginx-controller-metrics) win over the metric's own
+      # namespace/service labels (which identify what the request was routed
+      # to, e.g. namespace=dev, service=backend-service), renaming the
+      # latter to exported_namespace/exported_service - verified live, and
+      # it's the ones we actually want in alerts/dashboard queries.
+      honorLabels: true
