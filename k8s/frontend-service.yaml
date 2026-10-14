@@ -7,10 +7,9 @@ metadata:
     app.kubernetes.io/name: frontend
     app.kubernetes.io/part-of: node-react-postgres-platform
 spec:
-  type: NodePort
+  type: ClusterIP
   selector:
     app.kubernetes.io/name: frontend
   ports:
     - port: 80
       targetPort: 80
-      nodePort: 30080

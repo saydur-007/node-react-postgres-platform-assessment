@@ -18,10 +18,5 @@ nodes:
       - containerPort: 443
         hostPort: 443
         protocol: TCP
-      # Frontend NodePort - without this mapping, 30080 only exists inside
-      # the kind node's Docker network, unreachable from the host browser.
-      - containerPort: 30080
-        hostPort: 30080
-        protocol: TCP
   - role: worker
   - role: worker
