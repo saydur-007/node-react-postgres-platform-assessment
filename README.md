@@ -2,7 +2,7 @@
 
 A small full-stack app (React frontend, Express backend, PostgreSQL) used as
 a DevOps take-home assessment. It is built up in stages: local containers
-first, then a local Kubernetes cluster, then (planned) Ingress, CI/CD,
+first, then a local Kubernetes cluster, then Ingress, then (planned) CI/CD,
 platform services, and observability.
 
 ## Repo structure
@@ -20,7 +20,7 @@ platform services, and observability.
 ├── k8s/                      # namespace, configmap, secret example, postgres
 │                             # StatefulSet + services, backend/frontend
 │                             # Deployments + services, kind cluster config,
-│                             # ingress (Task 3, not yet documented below)
+│                             # ingress
 ├── docs/                     # evidence screenshots
 ├── docker-compose.yml
 ├── Dockerfile.backend
@@ -99,14 +99,21 @@ docker compose down -v
 ## Task 2 — Kubernetes (kind)
 
 ```bash
-make cluster images secrets deploy
+make cluster ingress images secrets deploy
 ```
 
-Open http://localhost:30080.
+Add to `/etc/hosts`:
 
-> This documents Task 2 as it stood when merged. The `task-3-ingress`
-> branch changes `frontend-service` to `ClusterIP` and moves external
-> access behind an Ingress instead — not covered in this README section.
+```
+127.0.0.1 node-react.local
+```
+
+Open http://node-react.local.
+
+The frontend was first exposed directly with a `NodePort` Service
+(`30080`). Task 3 replaced that with the Ingress below, so
+`frontend-service` is now `ClusterIP` only — see Task 3 for how external
+access works now.
 
 Rebuild and roll out a code change:
 
@@ -159,7 +166,103 @@ make clean
 
 ---
 
-## Issue found during testing
+## Task 3 — Ingress / API Gateway
+
+`make ingress` installs ingress-nginx from the official kind-specific
+manifest, pinned to `controller-v1.15.1` (`k8s/` has no copy of it; the
+Makefile applies it straight from that pinned URL). `k8s/ingress-dev.yaml`
+routes host `node-react.local`: `/api` (Prefix) to `backend-service:4000`,
+`/` (Prefix) to `frontend-service:80`, with no `rewrite-target` annotation,
+so `/api/items` reaches the backend as `/api/items`.
+
+> As of this writing, Kubernetes SIG Network has retired the community
+> ingress-nginx project (announced November 2025); best-effort maintenance
+> ran only until March 2026, after which there are no further releases or
+> security fixes upstream. `controller-v1.15.1` still works for this local,
+> time-boxed assessment, but a real deployment built today should look at
+> the Gateway API or another controller instead.
+> ([kubernetes.io/blog](https://kubernetes.io/blog/2025/11/11/ingress-Nginx-retirement/))
+
+### Request path: Browser → Ingress → Service → Pod → PostgreSQL
+
+1. Browser resolves `node-react.local` to `127.0.0.1` via the `/etc/hosts`
+   entry.
+2. Connects to `127.0.0.1:80` → kind's `extraPortMappings`
+   (`k8s/kind-config.yaml`) forward that into the
+   `devops-assessment-control-plane` node's container port 80.
+3. The ingress-nginx controller pod is listening there via `hostPort`: its
+   Deployment is pinned with `nodeSelector: {ingress-ready: "true"}`
+   (`make ingress`'s `kubectl patch`), the only label matching that node.
+4. The controller matches the `Ingress` object (`app-ingress`, namespace
+   `dev`) by host and path, and proxies to `backend-service` or
+   `frontend-service` — both `ClusterIP` — not to a pod IP directly.
+5. `kube-proxy`'s iptables/IPVS rules for that Service load-balance to one
+   of its healthy pod endpoints.
+6. For `/api/*` requests, the backend pod queries Postgres through
+   `postgres-service` (`ClusterIP`), which routes to the single
+   `postgres-0` pod.
+
+### Kubernetes DNS
+
+A pod's `/etc/resolv.conf` (confirmed live inside a `backend` pod):
+
+```
+search dev.svc.cluster.local svc.cluster.local cluster.local
+nameserver 10.96.0.10
+options ndots:5
+```
+
+- `nameserver 10.96.0.10` is the `kube-dns` Service's ClusterIP, backed by
+  the CoreDNS pods in `kube-system`. CoreDNS watches the Kubernetes API for
+  `Service`/`EndpointSlice` objects directly and answers from that live
+  state — it isn't reading a static zone file.
+- `options ndots:5` means a name with fewer than 5 dots is not tried as
+  absolute first. A bare `backend-service` is tried against each `search`
+  suffix in order — `backend-service.dev.svc.cluster.local` first (same
+  namespace) — until one resolves.
+- A fully-qualified name with a trailing dot
+  (`backend-service.dev.svc.cluster.local.`) skips the search list and
+  resolves in one query.
+
+### Debugging
+
+**(a) Ingress reachable, backend not:**
+
+```bash
+kubectl get ingress -n dev app-ingress -o yaml   # host/paths/backend names correct?
+kubectl get endpoints backend-service -n dev     # empty = selector matches no Ready pod
+kubectl get pods -n dev -l app.kubernetes.io/name=backend -o wide
+kubectl describe pod -n dev -l app.kubernetes.io/name=backend   # readiness probe status/events
+kubectl logs -n dev -l app.kubernetes.io/name=backend --tail=50
+kubectl logs -n ingress-nginx -l app.kubernetes.io/component=controller --tail=50   # 502/503 upstream errors
+```
+
+**(b) Frontend can't reach backend:**
+
+```bash
+kubectl logs -n dev -l app.kubernetes.io/name=frontend --tail=50   # nginx access/error log, actual request path
+kubectl get cm app-config -n dev -o yaml          # BACKEND_URL=http://backend-service:4000 ?
+kubectl exec -n dev deploy/frontend -- cat /etc/nginx/conf.d/default.conf   # did envsubst render BACKEND_URL correctly?
+kubectl get ingress -n dev -o yaml                # /api path rule present, no stray rewrite-target
+```
+
+### Evolving to microservices
+
+Splitting the backend into multiple services means adding more path rules to
+the same `Ingress` — `/api/users` → `users-service`, `/api/orders` →
+`orders-service` — each its own `Deployment` + `ClusterIP` Service. The DNS
+and probe patterns already in place don't change. Once routing needs more
+than path matching — traffic splitting, canary rollouts, mTLS between
+services, retries/timeouts per route — a single `Ingress` object stops being
+enough, and that's the point to move to a dedicated API gateway or the
+Gateway API (the latter is also the direction Kubernetes itself now points
+to, given ingress-nginx's retirement above).
+
+---
+
+## Issues found during testing
+
+### 1. Postgres connection pool crash
 
 Deleting the Postgres pod (`kubectl delete pod -n dev postgres-0`) to test
 persistence crashed the backend:
@@ -183,8 +286,29 @@ persistence crashed the backend:
   already used in `backend/src/redisClient.js`).
 - **Re-test:** after `make redeploy`, deleted `postgres-0` again and polled
   `kubectl get pods -n dev` for about 40 seconds. Both backend pods stayed
-  at `RESTARTS: 0`. `GET /api/items` through the NodePort still returned the
-  item created before the test once Postgres was ready again.
+  at `RESTARTS: 0`. `GET /api/items` still returned the item created before
+  the test once Postgres was ready again.
+
+### 2. Ingress controller scheduled off the control-plane node
+
+- **Symptom:** `curl -H "Host: node-react.local" http://localhost/api/health`
+  failed with `Recv failure: Connection reset by peer` (curl exit code 56),
+  even though the controller pod was `Running` and `1/1 Ready`.
+- **Cause:** `kubectl get pods -n ingress-nginx -o wide` showed the
+  controller pod scheduled on a worker node. The pinned manifest's
+  controller Deployment only requires `nodeSelector: {kubernetes.io/os:
+  linux}` — nothing pins it to a specific node — so on this 3-node cluster
+  the scheduler was free to place it anywhere. But `k8s/kind-config.yaml`'s
+  `extraPortMappings` for ports 80/443 only forward into the
+  `devops-assessment-control-plane` container (confirmed with
+  `docker ps --filter name=devops-assessment-control-plane`). The host's
+  port 80 had nothing listening behind it on that node.
+- **Fix:** added a `kubectl patch deployment ingress-nginx-controller`
+  step to `make ingress`, setting
+  `nodeSelector: {ingress-ready: "true"}` — the label only the
+  control-plane node carries. After the rollout, `kubectl get pods -n
+  ingress-nginx -o wide` showed the pod on `devops-assessment-control-plane`,
+  and the same `curl` succeeded.
 
 ---
 
@@ -210,27 +334,22 @@ persistence crashed the backend:
 
 - [docs/task2-kubectl-get-all.png](docs/task2-kubectl-get-all.png) —
   `kubectl get all -n dev` output for Task 2.
+- [docs/task3-app-ingress.png](docs/task3-app-ingress.png) — the app
+  running at http://node-react.local through the Ingress.
 - [docs/task3-ingress-controller.png](docs/task3-ingress-controller.png) —
-  the ingress-nginx controller pod scheduling issue: it first landed on a
-  worker node, where the `kind-config.yaml` 80/443 `hostPort` mappings
-  (control-plane only) couldn't reach it. Fixed with a `kubectl patch` in
-  `make ingress` pinning the controller's `nodeSelector` to
-  `ingress-ready: "true"`.
+  the ingress-nginx controller pod, pinned to the control-plane node after
+  the scheduling fix above.
 
 ---
 
-## Task 3 — Ingress / API Gateway
-
-
-
 ## Task 4 — CI/CD & Multi-Environment Deployment
 
-
+TODO
 
 ## Task 5 — Platform Services: Redis, Queue, Search, Read/Write DB
 
-
+TODO
 
 ## Task 6 — Observability, Scaling & Rate Limiting
 
-
+TODO
