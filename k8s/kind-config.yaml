@@ -1,0 +1,27 @@
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: devops-assessment
+nodes:
+  - role: control-plane
+    kubeadmConfigPatches:
+      - |
+        kind: InitConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            node-labels: "ingress-ready=true"
+    extraPortMappings:
+      # 80/443 reserved for an ingress controller in Task 3; not used by
+      # Task 2's NodePort frontend.
+      - containerPort: 80
+        hostPort: 80
+        protocol: TCP
+      - containerPort: 443
+        hostPort: 443
+        protocol: TCP
+      # Frontend NodePort - without this mapping, 30080 only exists inside
+      # the kind node's Docker network, unreachable from the host browser.
+      - containerPort: 30080
+        hostPort: 30080
+        protocol: TCP
+  - role: worker
+  - role: worker
