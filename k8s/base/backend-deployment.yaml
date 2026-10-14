@@ -43,6 +43,11 @@ spec:
                 secretKeyRef:
                   name: app-secrets
                   key: DB_READ_URL
+            - name: REDIS_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: app-config
+                  key: REDIS_URL
           # Liveness only checks the process is up - a slow/unreachable DB
           # must not cause a restart loop that can never fix the DB.
           livenessProbe:

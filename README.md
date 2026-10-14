@@ -275,11 +275,80 @@ TODO
 
 ## Task 5 — Platform Services: Redis, Queue, Search, Read/Write DB
 
-TODO
+Added `redis` (`redis:7-alpine`) and `bullmq-worker` (the backend image,
+`command: node src/worker.js`) to both `docker-compose.yml` and
+`k8s/base/`. `REDIS_URL` is set on the backend, the worker, and in
+`k8s/base/app-configmap.yaml`. OpenSearch/`SEARCH_URL` was skipped under
+the time limit — `backend/src/search.js` already no-ops cleanly when
+`SEARCH_URL` is unset (confirmed in Task 1/2 testing), so nothing breaks.
+`/api/health/redis` returns `{"status":"ok"}` against the live cluster.
+
+**Read/write routing** lives in application code: `backend/src/db.js`
+holds two `pg.Pool` instances, `writePool` (from `DB_WRITE_URL`) and
+`readPool` (from `DB_READ_URL`); `write()` always uses `writePool`,
+`read()` always uses `readPool`. The alternative is a DB proxy (PgBouncer,
+pgpool-II) that makes the split transparent to the app — simpler
+application code, but another component to run and one more network hop.
+
+**Replication lag**: a replica can be milliseconds to seconds behind the
+primary. Anything that reads its own recent write — a redirect-after-POST
+that re-fetches the record, a uniqueness check before an insert, "did my
+update actually save?" — must go through `write()`/`writePool` (the
+primary), never `read()`/`readPool`, or it risks reading stale data.
 
 ## Task 6 — Observability, Scaling & Rate Limiting
 
-TODO
+**HPA** (`k8s/base/hpa-backend.yaml`): `autoscaling/v2`, targets the
+`backend` Deployment, 2–5 replicas, scales on 70% average CPU utilization.
+2 as a floor keeps the readiness/liveness split from Task 2 meaningful (one
+pod can be unready without zero capacity); 70% leaves headroom before
+requests start queueing; 5 is a sane cap for a local kind cluster's actual
+CPU budget. **Needs `metrics-server` installed in kind for the HPA to see
+real CPU numbers** — not installed here (time limit), so `kubectl get hpa`
+currently shows `TARGETS: cpu: <unknown>/70%`. The HPA object itself is
+live and correctly configured either way.
+
+**Rate limiting**: `nginx.ingress.kubernetes.io/limit-rps: "10"` and
+`limit-burst-multiplier: "3"` on `k8s/base/ingress.yaml`. ingress-nginx
+applies these per Ingress resource, not per path rule, so this currently
+covers both `/api` and `/`, not `/api` alone — splitting into two Ingress
+objects sharing the same host would scope it to `/api` only, skipped here
+for time. 10 req/s per client IP is generous for a single-user local demo
+but still catches an accidental infinite-retry loop or a basic flood;
+burst×3 (30) absorbs a normal page load's handful of near-simultaneous
+requests without tripping on legitimate traffic.
+
+**What I'd alert on, and why**:
+- **5xx error rate** — the most direct signal something is actually broken
+  for users, independent of load.
+- **p95 latency** — catches degradation (slow queries, GC pauses, a
+  struggling dependency) that error rate and CPU alone can miss.
+- **CPU near the HPA's 70% target with replicas already at 5 (max)** — the
+  autoscaler is out of headroom; the next symptom is queueing, not more
+  capacity.
+- **Postgres down** (`/api/health/ready` failing cluster-wide) — single
+  StatefulSet replica, so this is a hard outage, not degraded service, and
+  needs to page immediately rather than wait for a trend.
+
+---
+
+## Not completed (time limit)
+
+- **OpenSearch**: add `search-deployment.yaml`/`search-service.yaml`
+  (single-node dev mode, same pattern as `redis-deployment.yaml`), set
+  `SEARCH_URL=http://search-service:9200`. `backend/src/search.js` already
+  has the health-check code; it would just start reporting real status
+  instead of being unset.
+- **Prometheus + Grafana**: deploy Prometheus with a scrape config
+  targeting pods annotated `prometheus.io/scrape: "true"`; annotate the
+  backend Deployment accordingly. Add Grafana pointed at that Prometheus,
+  with one dashboard covering backend CPU/memory, request rate, error
+  rate, and replica count over time (the HPA above makes that last one
+  meaningful).
+- **Fluent Bit + Loki**: Fluent Bit as a DaemonSet (one per node, so it
+  picks up every pod's logs regardless of scheduling) shipping to Loki;
+  verify with a Grafana Explore query like `{namespace="dev"}` to confirm
+  backend logs are arriving and filterable by label.
 
 ---
 
