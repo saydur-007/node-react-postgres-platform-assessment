@@ -14,3 +14,7 @@ resources:
   - frontend-deployment.yaml
   - frontend-service.yaml
   - ingress.yaml
+  - redis-deployment.yaml
+  - redis-service.yaml
+  - bullmq-worker-deployment.yaml
+  - hpa-backend.yaml

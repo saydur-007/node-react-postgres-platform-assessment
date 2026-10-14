@@ -11,3 +11,4 @@ data:
   # into its config in Compose, now pointed at the k8s Service instead of
   # the Compose service name.
   BACKEND_URL: "http://backend-service:4000"
+  REDIS_URL: "redis://redis-service:6379"

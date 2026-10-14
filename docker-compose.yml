@@ -22,6 +22,7 @@ services:
       PORT: "4000"
       DB_WRITE_URL: postgres://${DB_USER}:${DB_PASSWORD}@postgres:5432/${DB_NAME}
       DB_READ_URL: postgres://${DB_USER}:${DB_PASSWORD}@postgres:5432/${DB_NAME}
+      REDIS_URL: redis://redis:6379
     expose:
       - "4000"
     depends_on:
@@ -33,6 +34,21 @@ services:
       timeout: 5s
       retries: 5
       start_period: 10s
+
+  redis:
+    image: redis:7-alpine
+    expose:
+      - "6379"
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    command: ["node", "src/worker.js"]
+    environment:
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      - redis
 
   frontend:
     build:

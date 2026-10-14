@@ -4,6 +4,11 @@ metadata:
   name: app-ingress
   labels:
     app.kubernetes.io/part-of: node-react-postgres-platform
+  annotations:
+    # ingress-nginx applies rate-limit annotations per Ingress resource, not
+    # per path rule, so this covers both /api and / (not /api alone).
+    nginx.ingress.kubernetes.io/limit-rps: "10"
+    nginx.ingress.kubernetes.io/limit-burst-multiplier: "3"
 spec:
   ingressClassName: nginx
   rules:
