@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app-config
+  namespace: dev
+  labels:
+    app.kubernetes.io/part-of: node-react-postgres-platform
+data:
+  PORT: "4000"
+  NODE_ENV: "production"
+  # Service DNS name, not a secret - same var the nginx image envsubst's
+  # into its config in Compose, now pointed at the k8s Service instead of
+  # the Compose service name.
+  BACKEND_URL: "http://backend-service:4000"
