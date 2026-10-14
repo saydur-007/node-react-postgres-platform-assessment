@@ -7,12 +7,31 @@ ENV_FILE := .env
 -include $(ENV_FILE)
 export
 
-.PHONY: cluster images secrets deploy redeploy status clean
+INGRESS_NGINX_VERSION := controller-v1.15.1
+INGRESS_NGINX_MANIFEST := https://raw.githubusercontent.com/kubernetes/ingress-nginx/$(INGRESS_NGINX_VERSION)/deploy/static/provider/kind/deploy.yaml
 
-# Usage: make cluster images secrets deploy
+.PHONY: cluster ingress images secrets deploy redeploy status clean
+
+# Usage: make cluster ingress images secrets deploy
 cluster:
 	kind get clusters | grep -qx $(CLUSTER_NAME) || \
 		kind create cluster --config k8s/kind-config.yaml
+
+# Pinned to a release tag, not "main" - the manifest contents (and which
+# k8s versions it supports) must not change under us on a later run.
+ingress:
+	kubectl apply -f $(INGRESS_NGINX_MANIFEST)
+	# This manifest's controller Deployment only requires kubernetes.io/os:
+	# linux, so on a multi-node cluster the scheduler can place it on a
+	# worker - but the 80/443 hostPort mappings in kind-config.yaml only
+	# reach the control-plane node we labeled ingress-ready=true. Force it
+	# there explicitly instead of relying on scheduler luck.
+	kubectl patch deployment ingress-nginx-controller -n ingress-nginx \
+		--type merge -p '{"spec":{"template":{"spec":{"nodeSelector":{"ingress-ready":"true"}}}}}'
+	kubectl wait --namespace ingress-nginx \
+		--for=condition=ready pod \
+		--selector=app.kubernetes.io/component=controller \
+		--timeout=180s
 
 images:
 	docker build -f Dockerfile.backend -t backend:dev .
@@ -47,6 +66,7 @@ deploy:
 	kubectl wait --for=condition=available deployment/backend -n $(NAMESPACE) --timeout=120s
 	kubectl apply -f k8s/frontend-deployment.yaml
 	kubectl apply -f k8s/frontend-service.yaml
+	kubectl apply -f k8s/ingress-dev.yaml
 
 # Rebuild + reload images, then force backend/frontend pods to pick them
 # up. Needed because the :dev tag never changes, and imagePullPolicy:
