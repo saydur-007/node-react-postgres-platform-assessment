@@ -15,10 +15,12 @@ METRICS_SERVER_MANIFEST := https://github.com/kubernetes-sigs/metrics-server/rel
 
 MONITORING_NAMESPACE := monitoring
 KUBE_PROMETHEUS_STACK_VERSION := 91.8.2
+LOKI_VERSION := 7.3.0
+FLUENT_BIT_VERSION := 0.58.2
 
-.PHONY: cluster ingress metrics observability images secrets deploy redeploy status clean
+.PHONY: cluster ingress metrics observability logging images secrets deploy redeploy status clean
 
-# Usage: make cluster ingress images secrets deploy
+# Usage: make cluster ingress metrics images secrets deploy observability logging
 cluster:
 	kind get clusters | grep -qx $(CLUSTER_NAME) || \
 		kind create cluster --config k8s/kind-config.yaml
@@ -83,6 +85,23 @@ observability:
 	kubectl apply -f observability/ingress-metrics.yaml
 	kubectl apply -f observability/dashboard-backend.yaml
 	kubectl apply -f observability/alerts.yaml
+
+# Node log collectors and single-binary Loki; observability must run first
+# so the Grafana release and its admin Secret already exist.
+logging:
+	kubectl create namespace $(MONITORING_NAMESPACE) --dry-run=client -o yaml | kubectl apply -f -
+	helm repo add grafana https://grafana.github.io/helm-charts
+	helm repo add fluent https://fluent.github.io/helm-charts
+	helm repo update grafana fluent
+	helm upgrade --install loki grafana/loki \
+		--version $(LOKI_VERSION) --namespace $(MONITORING_NAMESPACE) \
+		--values observability/loki-values.yaml --wait --timeout 5m
+	helm upgrade --install fluent-bit fluent/fluent-bit \
+		--version $(FLUENT_BIT_VERSION) --namespace $(MONITORING_NAMESPACE) \
+		--values observability/fluentbit-values.yaml --wait --timeout 5m
+	helm upgrade kube-prometheus-stack prometheus-community/kube-prometheus-stack \
+		--version $(KUBE_PROMETHEUS_STACK_VERSION) --namespace $(MONITORING_NAMESPACE) \
+		--values observability/prometheus-values.yaml --wait --timeout 5m
 
 images:
 	docker build -f Dockerfile.backend -t backend:dev .

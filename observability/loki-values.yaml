@@ -1,0 +1,98 @@
+# Helm values for grafana/loki, pinned to chart 7.3.0 (Loki image 3.6.11) - see
+# the "logging" Makefile target. Installed into the "monitoring" namespace
+# (same as kube-prometheus-stack), outside k8s/base and k8s/overlays, so
+# `kubectl apply -k` (what CI runs) never touches any of this.
+
+# Single Loki process doing everything (vs. SimpleScalable's separate
+# read/write/backend components, which need object storage - S3/GCS/Azure
+# - to coordinate through). One laptop, one binary, local disk: no object
+# storage to run or pay for.
+deploymentMode: SingleBinary
+
+loki:
+  auth_enabled: false
+  storage:
+    type: filesystem
+  schemaConfig:
+    configs:
+      - from: "2024-04-01"
+        store: tsdb
+        object_store: filesystem
+        schema: v13
+        index:
+          prefix: loki_index_
+          period: 24h
+  # Bound query parallelism to the single laptop process.
+  limits_config:
+    max_query_parallelism: 2
+  querier:
+    max_concurrent: 2
+  commonConfig:
+    # Chart default is 3, inherited from the multi-replica SimpleScalable
+    # mode. With one single-binary replica, asking for 3 copies of every
+    # chunk on a cluster that only has one Loki process is unsatisfiable.
+    replication_factor: 1
+
+singleBinary:
+  replicas: 1
+  # Ephemeral: no PVC, logs don't survive pod replacement. Same dev-only
+  # trade-off as Prometheus/Alertmanager/Grafana in prometheus-values.yaml
+  # - short-lived local logs are fine for this assessment.
+  persistence:
+    enabled: false
+  # Chart 7.3.0 omits /var/loki when persistence is disabled; mount a
+  # writable emptyDir explicitly while keeping the root filesystem read-only.
+  extraVolumes:
+    - name: loki-data
+      emptyDir: {}
+  extraVolumeMounts:
+    - name: loki-data
+      mountPath: /var/loki
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
+
+# These default to 3 even when deploymentMode is SingleBinary.
+read:
+  replicas: 0
+write:
+  replicas: 0
+backend:
+  replicas: 0
+
+# Default external memcached caches allocate 8Gi + 1Gi; unnecessary here.
+chunksCache:
+  enabled: false
+resultsCache:
+  enabled: false
+
+# Single-binary mode has exactly one Loki endpoint to call directly -
+# the gateway exists to route between separate read/write/backend
+# services in SimpleScalable/Distributed mode, which don't exist here.
+gateway:
+  enabled: false
+
+# Synthetic log generator (writes + reads canary log lines to self-test
+# Loki) - a DaemonSet, so one extra pod per node. Not needed to verify
+# real application logs for this assessment.
+lokiCanary:
+  enabled: false
+
+# The chart's helm-test hook depends on the canary (validated at template
+# time: "Helm test requires the Loki Canary to be enabled" - verified
+# live), so this has to come down with it.
+test:
+  enabled: false
+
+# No Loki recording/alerting rules: Prometheus owns the assessment alerts.
+sidecar:
+  rules:
+    enabled: false
+
+# monitoring.{dashboards,rules,selfMonitoring,serviceMonitor}.enabled all
+# default to false already - no Prometheus self-scraping/dashboards/rules
+# for Loki's own internals, out of scope here. Left at chart defaults.

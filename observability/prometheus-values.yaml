@@ -64,6 +64,14 @@ prometheus-node-exporter:
       memory: 32Mi
 
 grafana:
+  additionalDataSources:
+    - name: Loki
+      uid: loki
+      type: loki
+      access: proxy
+      url: http://loki.monitoring.svc.cluster.local:3100
+      isDefault: false
+      editable: false
   resources:
     requests:
       cpu: 50m

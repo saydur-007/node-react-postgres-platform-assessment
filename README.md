@@ -2,8 +2,9 @@
 
 A small full-stack app (React frontend, Express backend, PostgreSQL) used as
 a DevOps take-home assessment. It is built up in stages: local containers
-first, then a local Kubernetes cluster, then Ingress, then (planned) CI/CD,
-platform services, and observability.
+first, then a local Kubernetes cluster, then Ingress, CI/CD, platform
+services, and observability.
+The sections below describe the stages available on this branch.
 
 ## Repo structure
 
@@ -26,6 +27,7 @@ platform services, and observability.
 │   │                           # ingress)
 │   └── overlays/{dev,preprod,release}/   # namespace, image tags, ingress
 │                                         # host per environment
+├── observability/            # Helm values, metrics monitor, dashboard, alerts
 ├── docs/                     # evidence screenshots
 ├── docker-compose.yml
 ├── Dockerfile.backend
@@ -55,7 +57,8 @@ $ make --version
 GNU Make 4.3
 ```
 
-No `helm` is required — nothing in the `Makefile` or `k8s/` uses it.
+Helm 3 is required for Task 6; tested with `v3.12.3`. Chart versions are
+pinned in the Makefile.
 
 ---
 
@@ -108,7 +111,7 @@ docker compose down -v
 
 ```bash
 cp .env.example .env   # skip if already done for Task 1
-make cluster ingress images secrets deploy
+make cluster ingress metrics images secrets deploy observability logging
 ```
 
 `make secrets` reads `.env`, so it has to exist before that step.
@@ -340,14 +343,12 @@ wired into this workflow since the CI cluster never has any.
   permitted` — the hosted runner's user can write into `/usr/local/bin` but
   not `chmod` a file there. Fixed by downloading to `/tmp`, `chmod`-ing
   there, then `sudo mv`-ing into place, for both `kind` and `kustomize` in
-  `.github/actions/deploy-to-kind/action.yml`. **Not yet pushed** — the
-  next run on a protected branch will still hit this until this fix is
-  committed.
+  `.github/actions/deploy-to-kind/action.yml`. The fix is already present
+  on `origin/master`
+  and this branch.
 
-**Evidence**: a `docs/task4-actions-run.png` screenshot is referenced by
-this plan but doesn't exist yet — every real `push`-triggered run so far
-has failed at the `deploy` step on the bug above, so there's no successful
-run to screenshot until the fix above is committed and pushed.
+**Evidence:** the passing deployment screenshot
+`docs/task4-deploy-run.png` is embedded below.
 
 ## Task 5 — Platform Services: Redis, Queue, Search, Read/Write DB
 
@@ -389,52 +390,152 @@ primary), never `read()`/`readPool`, or it risks reading stale data.
 
 ## Task 6 — Observability, Scaling & Rate Limiting
 
-**HPA** (`k8s/base/hpa-backend.yaml`): `autoscaling/v2`, targets the
-`backend` Deployment, 2–5 replicas, scales on 70% average CPU utilization.
-2 as a floor keeps the readiness/liveness split from Task 2 meaningful (one
-pod can be unready without zero capacity); 70% leaves headroom before
-requests start queueing; 5 is a sane cap for a local kind cluster's actual
-CPU budget. **Needs `metrics-server` installed in kind for the HPA to see
-real CPU numbers** — not installed here (time limit), so `kubectl get hpa`
-currently shows `TARGETS: cpu: <unknown>/70%`. The HPA object itself is
-live and correctly configured either way.
+Bring up the complete local stack in this order (requires Helm 3 and a root
+`.env` with `GRAFANA_ADMIN_PASSWORD` set):
 
-**Rate limiting**: `nginx.ingress.kubernetes.io/limit-rps: "10"` and
-`limit-burst-multiplier: "3"` on `k8s/base/ingress.yaml`. ingress-nginx
-applies these per Ingress resource, not per path rule, so this currently
-covers both `/api` and `/`, not `/api` alone — splitting into two Ingress
-objects sharing the same host would scope it to `/api` only, skipped here
-for time. 10 req/s per client IP is generous for a single-user local demo
-but still catches an accidental infinite-retry loop or a basic flood;
-burst×3 (30) absorbs a normal page load's handful of near-simultaneous
-requests without tripping on legitimate traffic.
+```bash
+make cluster ingress metrics images secrets deploy observability logging
+```
 
-**What I'd alert on, and why**:
-- **5xx error rate** — the most direct signal something is actually broken
-  for users, independent of load.
-- **p95 latency** — catches degradation (slow queries, GC pauses, a
-  struggling dependency) that error rate and CPU alone can miss.
-- **CPU near the HPA's 70% target with replicas already at 5 (max)** — the
-  autoscaler is out of headroom; the next symptom is queueing, not more
-  capacity.
-- **Postgres down** (`/api/health/ready` failing cluster-wide) — single
-  StatefulSet replica, so this is a hard outage, not degraded service, and
-  needs to page immediately rather than wait for a trend.
+**Metrics stack:** `make observability` installs
+`prometheus-community/kube-prometheus-stack` chart **91.8.2** in `monitoring`:
+Prometheus, Alertmanager, Grafana, Prometheus Operator, kube-state-metrics,
+and node-exporter. Values and extra resources live in `observability/`,
+outside the application Kustomize overlays, so application CI deploys do
+not manage the monitoring releases. Prometheus retains 6 hours in ephemeral
+storage; Grafana and Loki are also disposable local services. Resource
+requests/limits are deliberately small; Grafana has a 512Mi memory limit
+because 128Mi caused live OOM restarts during load testing. The Grafana
+admin Secret is created from `.env`, rather than embedded in Helm values.
 
----
+Kubelet/cAdvisor provides container CPU and memory; kube-state-metrics
+provides Deployment, HPA and StatefulSet state. The backend has no native
+Prometheus endpoint, so ingress-nginx provides request counters and duration
+histograms. `observability/ingress-metrics.yaml` exposes port 10254 and
+scrapes every 15 seconds with `honorLabels: true`. `make ingress` explicitly
+passes `--enable-metrics=true`. Monitor/rule selectors accept our resources
+without a Helm release label. `make metrics` installs metrics-server
+**v0.9.0**, using `--kubelet-insecure-tls` for kind's self-signed kubelet
+certificates; it supplies the HPA resource API independently of Prometheus.
 
-## Not completed (time limit)
+**Grafana:** open http://grafana.node-react.local (add
+`127.0.0.1 grafana.node-react.local` to `/etc/hosts` if needed), log in as
+`admin` using `.env`'s password. The ConfigMap in
+`observability/dashboard-backend.yaml` provisions the **Backend** dashboard
+at http://grafana.node-react.local/d/backend-overview/backend with six panels:
 
-- **Prometheus + Grafana**: deploy Prometheus with a scrape config
-  targeting pods annotated `prometheus.io/scrape: "true"`; annotate the
-  backend Deployment accordingly. Add Grafana pointed at that Prometheus,
-  with one dashboard covering backend CPU/memory, request rate, error
-  rate, and replica count over time (the HPA above makes that last one
-  meaningful).
-- **Fluent Bit + Loki**: Fluent Bit as a DaemonSet (one per node, so it
-  picks up every pod's logs regardless of scheduling) shipping to Loki;
-  verify with a Grafana Explore query like `{namespace="dev"}` to confirm
-  backend logs are arriving and filterable by label.
+| Panel | Signal and purpose |
+|---|---|
+| Backend CPU usage | Per-pod CPU cores from the 5-minute cAdvisor counter rate; shows load distribution and scaling pressure. |
+| Backend memory usage | Per-pod working-set bytes; identifies growth toward the 256Mi container limit. |
+| Request rate | Summed 5-minute rate of ingress requests to `backend-service`; shows incoming requests/second. |
+| Error rate | Backend ingress 5xx requests as a percentage of all requests; a zero fallback handles absent 5xx series. No traffic can still produce no data. |
+| p95 latency | 95th percentile from ingress duration histogram buckets over 5 minutes, in seconds; exposes slow requests. |
+| Backend replicas over time | Actual Deployment replicas alongside HPA desired replicas; shows scaling and reconciliation. |
+
+**Six alerts** are installed by `observability/alerts.yaml` and evaluated
+by Prometheus; Alertmanager is deployed, with no external notification
+receiver configured. These are local assessment thresholds, not measured
+production SLOs:
+
+| Alert | Threshold / duration / severity | Why |
+|---|---|---|
+| `BackendHighErrorRate` | 5xx fraction >5%, sustained 5m; warning | One in twenty failed requests is a material user impact. A 5-minute rate and hold avoid reacting to a single transient error. |
+| `BackendHighP95Latency` | p95 >1s, sustained 5m; warning | A second is noticeably slow for this small CRUD API; the hold filters brief cold starts or dependency spikes. |
+| `BackendCPUNearLimit` | Per-pod CPU >90% of its limit for 10m; warning | At >450m of the 500m limit, a pod has little room before throttling. Ten minutes gives HPA time to react and excludes short bursts. This compares against limits, whereas HPA uses requests. |
+| `BackendHPAAtMaxReplicas` | Current replicas >= max (5) for 10m; warning | Sustained use of all local capacity leaves no autoscaling headroom; the hold avoids alerting on a brief successful scale-up. |
+| `BackendPodsNotReady` | Available Deployment replicas < desired for 5m; critical | Persistent missing capacity suggests failed probes, crashes or unschedulable pods. Five minutes allows normal rolling updates and initialization. |
+| `PostgresDown` | Ready StatefulSet replicas < desired for 2m; critical | There is one database replica, so its absence blocks DB-backed requests. A shorter hold allows a routine restart but catches a sustained hard outage quickly. |
+
+**HPA:** `k8s/base/hpa-backend.yaml` uses `autoscaling/v2`, targets the
+backend Deployment, and keeps **2–5 replicas** at **70% average CPU
+utilization of requests**. Each backend requests 100m CPU, so the target
+is about 70m per pod, not 70% of its 500m limit. Two pods preserve capacity
+when one is unready; 70% leaves headroom; five caps laptop resource use.
+`behavior.scaleDown.stabilizationWindowSeconds: 300` explicitly keeps the
+highest replica recommendation over the previous **5 minutes**, avoiding
+rapid scale-down and oscillation after a burst. It is a rolling window,
+not an unconditional five-minute sleep. Scale-up uses Kubernetes defaults.
+Live `kubectl get hpa -n dev` resolves CPU metrics and shows two idle replicas.
+
+**Rate limiting:** `k8s/base/ingress.yaml` sets `limit-rps: "10"` and
+`limit-burst-multiplier: "3"`: 10 requests/second per client IP with a
+burst allowance of 30, per controller replica. Ten is generous for a local
+single-user demo while bounding an accidental retry loop; burst×3 absorbs
+a normal page load. The annotations cover both `/api` and `/` on this
+Ingress. Separate Ingress resources would be needed for API-only limits.
+With multiple controller replicas the effective limit can increase; this
+cluster runs one. These are ingress controls, not a global application quota.
+
+**Logging pipeline: Fluent Bit DaemonSet → Loki → Grafana.** `make logging`
+installs **grafana/loki 7.3.0** (actual Loki image **3.6.11**) and
+**fluent/fluent-bit 0.58.2** (Fluent Bit **5.1.2**) in `monitoring`, then
+upgrades the existing kube-prometheus-stack release with the same pinned
+version and values. `observability/prometheus-values.yaml` provisions Loki
+through `grafana.additionalDataSources` with stable UID `loki`, using
+server-side proxy access to `http://loki.monitoring.svc.cluster.local:3100`.
+
+`observability/loki-values.yaml` runs one **SingleBinary** replica, replication
+factor 1, TSDB schema v13 with a 24-hour index period and filesystem storage
+on an explicit `/var/loki` emptyDir. Read/write/backend replicas, external
+Memcached caches, gateway, canary, test hook and rule sidecar are disabled.
+Loki requests 50m CPU/128Mi RAM and is limited to 200m/256Mi; query concurrency
+is two. No PVC means logs disappear on pod replacement, and no retention
+policy is configured: long-running use can fill node disk. Authentication
+is disabled for this local ClusterIP-only Loki service.
+
+`observability/fluentbit-values.yaml` runs one collector on each of the
+three kind nodes, including the tainted control-plane via tolerations.
+It mounts `/var/log` read-only, tails `/var/log/containers/*.log` with
+Docker/CRI multiline parsing, and enriches records via the Kubernetes API
+using chart-created ServiceAccount/RBAC. It emits JSON lines to Loki with
+only the explicit stream labels `namespace`, `pod`, `container`, and `app`;
+`app` maps from `app.kubernetes.io/name`. Avoiding automatic export of every
+Kubernetes label bounds unnecessary stream cardinality. Each collector
+requests 25m/32Mi, is limited to 100m/128Mi, and caps the input buffer at 5MB.
+Tail offsets live in an emptyDir database and historical files are read
+from the head, so collector replacement can replay logs. Retries are
+unlimited but memory buffering is bounded; there is no durable outage spool.
+
+**Rejected alternative:** SimpleScalable Loki with object storage and
+Memcached would separate read/write capacity and improve scalability, but
+adds components, storage credentials and substantial memory for a laptop
+assessment. SingleBinary filesystem storage keeps this demo small; it
+trades away HA and durable logs. See the official
+[Loki chart component defaults](https://grafana.com/docs/loki/latest/setup/install/helm/concepts/)
+and [Fluent Bit Loki label configuration](https://docs.fluentbit.io/manual/4.1/data-pipeline/outputs/loki).
+
+Example LogQL queries in Grafana Explore (Loki datasource, last hour):
+
+```logql
+{namespace="dev", app="backend"}
+{namespace="dev", app="backend"} |= "redis"
+```
+
+[Open the exact Grafana Explore query](http://grafana.node-react.local/explore?schemaVersion=1&panes=%7B%22A%22%3A%7B%22datasource%22%3A%22loki%22%2C%22queries%22%3A%5B%7B%22refId%22%3A%22A%22%2C%22expr%22%3A%22%7Bnamespace%3D%5C%22dev%5C%22%2C%20app%3D%5C%22backend%5C%22%7D%22%2C%22queryType%22%3A%22range%22%2C%22editorMode%22%3A%22code%22%2C%22datasource%22%3A%7B%22type%22%3A%22loki%22%2C%22uid%22%3A%22loki%22%7D%7D%5D%2C%22range%22%3A%7B%22from%22%3A%22now-1h%22%2C%22to%22%3A%22now%22%7D%7D%7D&orgId=1)
+
+Live verification on **2026-10-14 (Asia/Dhaka)**: Loki was 1/1 Ready,
+Fluent Bit was 3/3 Ready across all three nodes, and Grafana reported
+`Data source successfully connected`. Both queries returned the backend
+stdout line in **Grafana Explore**, with the requested namespace, pod,
+container and app labels. All six dashboard panels returned live series
+through Grafana's Prometheus proxy; all six application alerts were loaded,
+healthy (`ok`) and inactive. Logging screenshot evidence is linked below.
+The Redis filter uses a deliberately generated backend diagnostic line,
+`task6 logging verification: redis ping PONG`, from an actual successful
+Redis PING written to the backend container's stdout. Healthy Redis requests
+are not normally logged by this application, so this checks filtering
+without inventing an outage or claiming an existing Redis error.
+
+**Backend logs in Grafana Explore** — `{namespace="dev", app="backend"}`
+returns logs from the backend container.
+
+![Grafana Explore showing backend logs](docs/task6-grafana-logs-backend.png)
+
+**Redis text filter** — `{namespace="dev", app="backend"} |= "redis"`
+matches the successful `redis ping PONG` diagnostic line.
+
+![Grafana Explore showing backend logs filtered by redis](docs/task6-grafana-logs-redis.png)
 
 ---
 
@@ -488,6 +589,36 @@ persistence crashed the backend:
   `kubectl get pods -n ingress-nginx -o wide` showed the pod on
   `devops-assessment-control-plane`, and the same `curl` succeeded.
 
+### 3. Ingress metrics disabled by the pinned manifest
+
+- **Symptom:** port 10254 exposed Go runtime metrics, but no
+  `nginx_ingress_controller_*` request or duration series.
+- **Cause:** the pinned ingress controller manifest omitted
+  `--enable-metrics=true`; a ServiceMonitor alone cannot enable collection.
+- **Fix:** `make ingress` idempotently adds the flag to the controller args.
+  The metrics Service and ServiceMonitor then scrape port 10254; backend
+  requests populate the counters and histogram used by the dashboard.
+
+### 4. Prometheus target labels hid the routed backend service
+
+- **Symptom:** queries selecting `service="backend-service"` returned no
+  ingress series even though scraping was healthy.
+- **Cause:** target labels `service="ingress-nginx-controller-metrics"`
+  and `namespace="ingress-nginx"` took precedence; metric labels became
+  `exported_service` and `exported_namespace`.
+- **Fix:** set `honorLabels: true` on the ingress ServiceMonitor endpoint,
+  preserving `service="backend-service"` and `namespace="dev"` for the
+  dashboard and alert selectors.
+
+### 5. Loki ephemeral storage mount missing
+
+- **Symptom:** Loki exited with `mkdir /var/loki: read-only file system`.
+- **Cause:** chart 7.3.0 with single-binary persistence disabled omitted the
+  data mount while retaining a read-only root filesystem.
+- **Fix:** explicitly mount an emptyDir at `/var/loki`; keep the read-only
+  root filesystem and disable the unused rule sidecar.
+
+
 ---
 
 ## Known limitations
@@ -496,15 +627,6 @@ persistence crashed the backend:
   credentials (`appuser`/`apppass`/`localhost`/`5432`/`appdb`), used only if
   `DB_WRITE_URL`/`DB_READ_URL` aren't set. Both `docker-compose.yml` and
   `k8s/` always set those, so this fallback path isn't exercised today.
-- `backend/package.json`'s `test` script is `node --test test/ || true` —
-  the `|| true` means the script always exits `0`, so a real test failure
-  wouldn't fail a CI step that runs it.
-- The backend logs repeated `redis connection error` messages in both
-  Compose and kind, because `backend/src/redisClient.js` and
-  `backend/src/queue.js` always try to connect to `REDIS_URL` (default
-  `redis://localhost:6379`), and no Redis container exists yet in either
-  `docker-compose.yml` or `k8s/` (planned for Task 5). This is expected
-  noise, not a bug.
 
 ---
 
@@ -516,17 +638,62 @@ persistence crashed the backend:
   settings are missing.
 - Fixed `:dev` image tags need `make redeploy`; CI (Task 4) uses unique
   branch-sha tags instead.
-- TODO: more after Tasks 4-6.
+- Durable monitoring/log storage, measured production alert thresholds, and
+  an external Alertmanager receiver before operating beyond this local demo.
 
 ---
 
 ## Evidence
 
-- [docs/task2-kubectl-get-all.png](docs/task2-kubectl-get-all.png) —
-  `kubectl get all -n dev` output for Task 2.
-- [docs/task3-app-ingress.png](docs/task3-app-ingress.png) — the app
-  running at http://node-react.local through the Ingress.
-- [docs/task3-ingress-controller.png](docs/task3-ingress-controller.png) —
-  the ingress-nginx controller pod, pinned to the control-plane node after
-  the scheduling fix above.
-- [docs/task4-deploy-run.png](docs/task4-deploy-run.png) — passing master run: build and test, push to GHCR, deploy to an ephemeral kind cluster, smoke test through the ingress.
+**Task 2 — Kubernetes application resources**
+
+![Task 2 — Kubernetes application resources](docs/task2-kubectl-get-all.png)
+
+**Task 3 — Application through the Ingress**
+
+![Task 3 — Application through the Ingress](docs/task3-app-ingress.png)
+
+**Task 3 — Ingress controller on the control-plane node**
+
+![Task 3 — Ingress controller on the control-plane node](docs/task3-ingress-controller.png)
+
+**Task 4 — Passing CI/CD deployment run**
+
+![Task 4 — Passing CI/CD deployment run](docs/task4-deploy-run.png)
+
+**Task 5 — Redis, queue worker and OpenSearch platform services**
+
+![Task 5 — Redis, queue worker and OpenSearch platform services](docs/task5-platform-services.png)
+
+**Task 6 — Six-panel Backend metrics dashboard**
+
+![Task 6 — Six-panel Backend metrics dashboard](docs/task6-grafana-dashboard.png)
+
+- [Task 6 — Backend logs in Grafana Explore](docs/task6-grafana-logs-backend.png) — embedded in Task 6 above.
+
+- [Task 6 — Backend logs filtered by redis](docs/task6-grafana-logs-redis.png) — embedded in Task 6 above.
+
+### Task 6 — Additional Grafana dashboards
+
+These screenshots show the bundled infrastructure dashboards alongside
+the custom six-panel Backend dashboard.
+
+**CoreDNS** — DNS request volume, request types, response codes and response duration.
+
+![Grafana dashboard: CoreDNS](docs/task6-grafana-coredns.png)
+
+**Grafana Overview** — Grafana build information, dashboards, HTTP request rate and latency.
+
+![Grafana dashboard: Grafana Overview](docs/task6-grafana-overview.png)
+
+**Kubernetes API server** — API server availability, read/write requests, request duration and work queues.
+
+![Grafana dashboard: Kubernetes API server](docs/task6-grafana-api-server.png)
+
+**Node Exporter / AIX** — Node CPU usage, load averages, disk I/O, disk space and network traffic, as shown in the bundled dashboard.
+
+![Grafana dashboard: Node Exporter / AIX](docs/task6-grafana-node-exporter-aix.png)
+
+**Node Exporter / USE Method / Cluster** — Cluster CPU and memory utilization and saturation, plus network utilization.
+
+![Grafana dashboard: Node Exporter / USE Method / Cluster](docs/task6-grafana-node-exporter-use-cluster.png)

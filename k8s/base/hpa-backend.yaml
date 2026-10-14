@@ -12,6 +12,10 @@ spec:
     name: backend
   minReplicas: 2
   maxReplicas: 5
+  behavior:
+    scaleDown:
+      # Keep the highest recommendation over 5 minutes to avoid flapping.
+      stabilizationWindowSeconds: 300
   metrics:
     - type: Resource
       resource:
