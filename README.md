@@ -6,6 +6,73 @@ first, then a local Kubernetes cluster, then Ingress, CI/CD, platform
 services, and observability.
 The sections below describe the stages available on this branch.
 
+## Architecture
+
+The platform runs on a three-node kind cluster. This diagram shows the
+application, metrics and logging paths using the namespaces in this repository.
+
+```mermaid
+flowchart TB
+    Browser["Browser"] -->|"HTTP"| Ingress
+
+    subgraph Kind["kind cluster — 3 nodes"]
+        subgraph IngressNS["ingress-nginx namespace"]
+            Ingress["ingress-nginx controller"]
+        end
+        subgraph Dev["dev namespace"]
+            Frontend["React / nginx frontend"]
+            Backend["Node.js backend"]
+            Postgres["PostgreSQL"]
+            Redis["Redis / BullMQ"]
+            Worker["BullMQ worker"]
+            Search["OpenSearch"]
+            HPA["HPA: 2–5 replicas, 70% CPU target"]
+        end
+        subgraph System["kube-system namespace"]
+            MetricsServer["metrics-server"]
+        end
+        subgraph Monitoring["monitoring namespace"]
+            Prometheus["Prometheus"]
+            Grafana["Grafana"]
+            StateMetrics["kube-state-metrics"]
+            NodeExporter["node-exporter: one per node"]
+            FluentBit["Fluent Bit: one per node"]
+            Loki["Loki: single binary, filesystem storage"]
+        end
+        subgraph Nodes["On each node"]
+            Kubelet["kubelet / cAdvisor"]
+            Logs["Container stdout / stderr logs"]
+        end
+    end
+
+    Ingress -->|"/"| Frontend
+    Ingress -->|"/api"| Backend
+    Frontend -->|"/api proxy"| Backend
+    Backend -->|"read and write pools"| Postgres
+    Backend -->|"enqueue jobs / Redis health"| Redis
+    Worker -->|"consume jobs"| Redis
+    Backend -->|"health check"| Search
+
+    MetricsServer -.->|"collect CPU metrics"| Kubelet
+    HPA -.->|"read resource metrics"| MetricsServer
+    HPA -.->|"scale; 300s scale-down window"| Backend
+    Prometheus -.->|"scrape ingress metrics"| Ingress
+    Prometheus -.->|"scrape container metrics"| Kubelet
+    Prometheus -.->|"scrape resource state"| StateMetrics
+    Prometheus -.->|"scrape node metrics"| NodeExporter
+    Grafana -.->|"query metrics"| Prometheus
+
+    Logs -->|"tail and enrich"| FluentBit
+    FluentBit -->|"ship logs"| Loki
+    Grafana -->|"query logs"| Loki
+```
+
+Both backend database pools connect to the same PostgreSQL instance in
+this local setup. The worker consumes BullMQ jobs through Redis;
+OpenSearch currently provides a health-check endpoint rather than a worker
+indexing pipeline. Ingress uses plain HTTP locally. The HPA keeps the
+highest scale-down recommendation over the previous five minutes.
+
 ## Repo structure
 
 ```
