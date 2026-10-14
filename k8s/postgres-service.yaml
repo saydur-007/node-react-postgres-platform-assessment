@@ -1,0 +1,18 @@
+# Regular ClusterIP service - this is what DB_WRITE_URL/DB_READ_URL point
+# at. The assessment calls for ClusterIP specifically, so this is kept
+# separate from the headless service the StatefulSet itself requires.
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-service
+  namespace: dev
+  labels:
+    app.kubernetes.io/name: postgres
+    app.kubernetes.io/part-of: node-react-postgres-platform
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: postgres
+  ports:
+    - port: 5432
+      targetPort: 5432
