@@ -519,3 +519,4 @@ persistence crashed the backend:
 - [docs/task3-ingress-controller.png](docs/task3-ingress-controller.png) —
   the ingress-nginx controller pod, pinned to the control-plane node after
   the scheduling fix above.
+- [docs/task4-deploy-run.png](docs/task4-deploy-run.png) — passing master run: build and test, push to GHCR, deploy to an ephemeral kind cluster, smoke test through the ingress.
