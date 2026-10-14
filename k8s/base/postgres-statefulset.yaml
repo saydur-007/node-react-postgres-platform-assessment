@@ -2,7 +2,6 @@ apiVersion: apps/v1
 kind: StatefulSet
 metadata:
   name: postgres
-  namespace: dev
   labels:
     app.kubernetes.io/name: postgres
     app.kubernetes.io/part-of: node-react-postgres-platform

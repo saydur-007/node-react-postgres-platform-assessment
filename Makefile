@@ -40,7 +40,7 @@ images:
 	kind load docker-image frontend:dev --name $(CLUSTER_NAME)
 
 secrets:
-	kubectl apply -f k8s/namespace-dev.yaml
+	kubectl apply -f k8s/overlays/dev/namespace.yaml
 	kubectl create secret generic app-secrets \
 		-n $(NAMESPACE) \
 		--from-literal=POSTGRES_USER=$(DB_USER) \
@@ -50,23 +50,15 @@ secrets:
 		--from-literal=DB_READ_URL=postgres://$(DB_USER):$(DB_PASSWORD)@postgres-service:5432/$(DB_NAME) \
 		--dry-run=client -o yaml | kubectl apply -f -
 
-# Applied in dependency order: namespace/config first, postgres next (and
-# waited on), then backend (waited on), then frontend - avoids backend pods
-# crash-looping through exponential backoff while waiting on a DB that
-# isn't there yet.
+# Single kustomize apply for the dev overlay (namespace, config, postgres,
+# backend, frontend, ingress all at once), then wait for postgres and
+# backend to actually be ready. On a brand-new cluster the backend may
+# crash-loop once or twice before postgres is ready - Kubernetes' own
+# restart backoff handles that; `kubectl wait` just blocks until it settles.
 deploy:
-	kubectl apply -f k8s/namespace-dev.yaml
-	kubectl apply -f k8s/app-configmap.yaml
-	kubectl apply -f k8s/postgres-headless-service.yaml
-	kubectl apply -f k8s/postgres-service.yaml
-	kubectl apply -f k8s/postgres-statefulset.yaml
+	kubectl apply -k k8s/overlays/dev
 	kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=postgres -n $(NAMESPACE) --timeout=120s
-	kubectl apply -f k8s/backend-deployment.yaml
-	kubectl apply -f k8s/backend-service.yaml
 	kubectl wait --for=condition=available deployment/backend -n $(NAMESPACE) --timeout=120s
-	kubectl apply -f k8s/frontend-deployment.yaml
-	kubectl apply -f k8s/frontend-service.yaml
-	kubectl apply -f k8s/ingress-dev.yaml
 
 # Rebuild + reload images, then force backend/frontend pods to pick them
 # up. Needed because the :dev tag never changes, and imagePullPolicy:
