@@ -10,8 +10,7 @@ nodes:
           kubeletExtraArgs:
             node-labels: "ingress-ready=true"
     extraPortMappings:
-         # 80/443 are mapped for the ingress-nginx controller, which is pinned to this node
-      # Task 2's NodePort frontend.
+      # 80/443 are mapped for the ingress-nginx controller, which is pinned to this node
       - containerPort: 80
         hostPort: 80
         protocol: TCP

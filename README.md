@@ -50,6 +50,8 @@ $ make --version
 GNU Make 4.3
 ```
 
+No `helm` is required — nothing in the `Makefile` or `k8s/` uses it.
+
 ---
 
 ## Task 1 — Docker Compose
@@ -72,35 +74,39 @@ docker compose down -v
 - **Multi-stage builds.** `Dockerfile.backend` separates a `deps` stage
   (`npm ci --omit=dev`) from the `runtime` stage, which only copies in
   `node_modules` and `src/`. `Dockerfile.frontend` separates the Vite
-  `build` stage from the `nginx:1.27-alpine` runtime stage, so no Node
+  `build` stage from the `nginx:1.27-alpine` runtime stage. No Node
   toolchain ships in the final image.
 - **Non-root backend.** `Dockerfile.backend` runs as the `node` user that
   `node:22-alpine` already ships with, not root.
 - **nginx `/api` proxy via `BACKEND_URL` template.**
-  `frontend/nginx.conf.template` is rendered by nginx's built-in
-  `envsubst`-on-templates mechanism at container start. Its `/api/`
-  location does `proxy_pass ${BACKEND_URL};` with no trailing slash, so a
-  request to `/api/items` is forwarded as `/api/items`, preserving the
-  prefix the backend's routes expect. The same image is used in
-  `docker-compose.yml` (`BACKEND_URL=http://backend:4000`) and in
-  `k8s/app-configmap.yaml` (`BACKEND_URL=http://backend-service:4000`).
+  `frontend/nginx.conf.template` is rendered by nginx's `envsubst`-on-templates
+  mechanism at container start. Its `/api/` location does
+  `proxy_pass ${BACKEND_URL};` with no trailing slash, so `/api/items` is
+  forwarded as `/api/items`, keeping the prefix the backend expects. The
+  same image is used in `docker-compose.yml`
+  (`BACKEND_URL=http://backend:4000`) and in `k8s/app-configmap.yaml`
+  (`BACKEND_URL=http://backend-service:4000`).
 - **Only the frontend is published to the host.** In `docker-compose.yml`,
-  only the `frontend` service has a `ports:` mapping
-  (`${FRONTEND_PORT:-8080}:80`). `postgres` and `backend` have no host port
-  mapping, so they're reachable only on the Compose network.
+  only `frontend` has a `ports:` mapping (`${FRONTEND_PORT:-8080}:80`).
+  `postgres` and `backend` have none, so they're reachable only on the
+  Compose network.
 - **Healthcheck on `/api/health/ready`, not `/api/health`.** The backend's
-  Compose healthcheck calls `/api/health/ready`, which checks Postgres is
-  reachable, instead of `/api/health`, which always returns `200`. This
-  stops Compose from calling the container healthy before it can actually
-  serve `/api/items`.
+  Compose healthcheck calls `/api/health/ready`, which checks Postgres,
+  instead of `/api/health`, which always returns `200`. This stops Compose
+  from calling the container healthy before it can serve `/api/items`.
+- **No secrets in Git.** Credentials live in `.env` (gitignored); only
+  `.env.example` with placeholder values is committed.
 
 ---
 
 ## Task 2 — Kubernetes (kind)
 
 ```bash
+cp .env.example .env   # skip if already done for Task 1
 make cluster ingress images secrets deploy
 ```
+
+`make secrets` reads `.env`, so it has to exist before that step.
 
 Add to `/etc/hosts`:
 
@@ -110,10 +116,8 @@ Add to `/etc/hosts`:
 
 Open http://node-react.local.
 
-The frontend was first exposed directly with a `NodePort` Service
-(`30080`). Task 3 replaced that with the Ingress below, so
-`frontend-service` is now `ClusterIP` only — see Task 3 for how external
-access works now.
+The frontend was first a `NodePort` Service (`30080`). Task 3 replaced that
+with the Ingress below, so `frontend-service` is now `ClusterIP` only.
 
 Rebuild and roll out a code change:
 
@@ -121,12 +125,11 @@ Rebuild and roll out a code change:
 make redeploy
 ```
 
-`redeploy` exists because the image tag is always `backend:dev`/`frontend:dev`
-and both Deployments use `imagePullPolicy: IfNotPresent`. After `make images`
-rebuilds and reloads the image into the kind nodes, a plain re-`apply` of the
-Deployment is a no-op (the tag didn't change, so kubelet doesn't re-pull).
-`make redeploy` rebuilds, reloads, then runs `kubectl rollout restart` on both
-Deployments to force the new image in.
+`redeploy` exists because images are always tagged `backend:dev`/`frontend:dev`
+with `imagePullPolicy: IfNotPresent`. After `make images` rebuilds and
+reloads the image, a plain re-`apply` is a no-op — kubelet won't re-pull the
+same tag. `make redeploy` rebuilds, reloads, then runs
+`kubectl rollout restart` on both Deployments to force the new image in.
 
 Tear the cluster down:
 
@@ -139,10 +142,9 @@ make clean
 - **StatefulSet + `volumeClaimTemplates`, not a static PV.** Postgres is a
   `StatefulSet` (`k8s/postgres-statefulset.yaml`) with a
   `volumeClaimTemplates` entry, so the controller provisions and binds its
-  own PVC automatically; a static PV/PVC pair would have to be created and
-  matched by hand.
+  own PVC. A static PV/PVC pair would need manual provisioning and binding.
 - **Headless + ClusterIP Postgres services.** `postgres-headless`
-  (`clusterIP: None`) exists only because the StatefulSet requires a
+  (`clusterIP: None`) exists only because the StatefulSet needs a
   `serviceName`. `DB_WRITE_URL`/`DB_READ_URL` point at the separate
   `postgres-service` (`ClusterIP`), per the assessment's requirement that
   Postgres be reachable via a ClusterIP service.
@@ -169,30 +171,30 @@ make clean
 ## Task 3 — Ingress / API Gateway
 
 `make ingress` installs ingress-nginx from the official kind-specific
-manifest, pinned to `controller-v1.15.1` (`k8s/` has no copy of it; the
-Makefile applies it straight from that pinned URL). `k8s/ingress-dev.yaml`
-routes host `node-react.local`: `/api` (Prefix) to `backend-service:4000`,
-`/` (Prefix) to `frontend-service:80`, with no `rewrite-target` annotation,
-so `/api/items` reaches the backend as `/api/items`.
+manifest, pinned to `controller-v1.15.1` (applied straight from that URL,
+not vendored into `k8s/`). `k8s/ingress-dev.yaml` routes host
+`node-react.local`: `/api` (Prefix) to `backend-service:4000`, `/` (Prefix)
+to `frontend-service:80`, with no `rewrite-target` annotation — so
+`/api/items` reaches the backend as `/api/items`.
 
 > As of this writing, Kubernetes SIG Network has retired the community
 > ingress-nginx project (announced November 2025); best-effort maintenance
 > ran only until March 2026, after which there are no further releases or
 > security fixes upstream. `controller-v1.15.1` still works for this local,
-> time-boxed assessment, but a real deployment built today should look at
-> the Gateway API or another controller instead.
+> time-boxed assessment. A deployment built today should use the Gateway
+> API or another controller instead.
 > ([kubernetes.io/blog](https://kubernetes.io/blog/2025/11/11/ingress-Nginx-retirement/))
 
 ### Request path: Browser → Ingress → Service → Pod → PostgreSQL
 
 1. Browser resolves `node-react.local` to `127.0.0.1` via the `/etc/hosts`
    entry.
-2. Connects to `127.0.0.1:80` → kind's `extraPortMappings`
-   (`k8s/kind-config.yaml`) forward that into the
-   `devops-assessment-control-plane` node's container port 80.
-3. The ingress-nginx controller pod is listening there via `hostPort`: its
+2. Connects to `127.0.0.1:80`. kind's `extraPortMappings`
+   (`k8s/kind-config.yaml`) forward that into the control-plane node's
+   container port 80.
+3. The ingress-nginx controller pod listens there via `hostPort` — its
    Deployment is pinned with `nodeSelector: {ingress-ready: "true"}`
-   (`make ingress`'s `kubectl patch`), the only label matching that node.
+   (`make ingress`'s `kubectl patch`), the only label that node carries.
 4. The controller matches the `Ingress` object (`app-ingress`, namespace
    `dev`) by host and path, and proxies to `backend-service` or
    `frontend-service` — both `ClusterIP` — not to a pod IP directly.
@@ -250,13 +252,26 @@ kubectl get ingress -n dev -o yaml                # /api path rule present, no s
 
 Splitting the backend into multiple services means adding more path rules to
 the same `Ingress` — `/api/users` → `users-service`, `/api/orders` →
-`orders-service` — each its own `Deployment` + `ClusterIP` Service. The DNS
-and probe patterns already in place don't change. Once routing needs more
-than path matching — traffic splitting, canary rollouts, mTLS between
-services, retries/timeouts per route — a single `Ingress` object stops being
-enough, and that's the point to move to a dedicated API gateway or the
-Gateway API (the latter is also the direction Kubernetes itself now points
-to, given ingress-nginx's retirement above).
+`orders-service` — each its own `Deployment` and `ClusterIP` Service. The
+DNS and probe patterns already in place don't change. Once routing needs
+more than path matching — traffic splitting, canary rollouts, mTLS, per-route
+retries/timeouts — move to a dedicated API gateway or the Gateway API.
+That's also the direction Kubernetes itself now points to, given
+ingress-nginx's retirement above.
+
+---
+
+## Task 4 — CI/CD & Multi-Environment Deployment
+
+TODO
+
+## Task 5 — Platform Services: Redis, Queue, Search, Read/Write DB
+
+TODO
+
+## Task 6 — Observability, Scaling & Rate Limiting
+
+TODO
 
 ---
 
@@ -295,20 +310,20 @@ persistence crashed the backend:
   failed with `Recv failure: Connection reset by peer` (curl exit code 56),
   even though the controller pod was `Running` and `1/1 Ready`.
 - **Cause:** `kubectl get pods -n ingress-nginx -o wide` showed the
-  controller pod scheduled on a worker node. The pinned manifest's
-  controller Deployment only requires `nodeSelector: {kubernetes.io/os:
-  linux}` — nothing pins it to a specific node — so on this 3-node cluster
-  the scheduler was free to place it anywhere. But `k8s/kind-config.yaml`'s
-  `extraPortMappings` for ports 80/443 only forward into the
-  `devops-assessment-control-plane` container (confirmed with
-  `docker ps --filter name=devops-assessment-control-plane`). The host's
-  port 80 had nothing listening behind it on that node.
+  controller pod on a worker node. The pinned manifest's controller
+  Deployment only requires `nodeSelector: {kubernetes.io/os: linux}` —
+  nothing pins it to a specific node — so the scheduler was free to place it
+  anywhere on this 3-node cluster. But `k8s/kind-config.yaml`'s
+  `extraPortMappings` for ports 80/443 only forward into the control-plane
+  container (confirmed with
+  `docker ps --filter name=devops-assessment-control-plane`). Nothing was
+  listening behind the host's port 80 on the node Docker was actually
+  using.
 - **Fix:** added a `kubectl patch deployment ingress-nginx-controller`
-  step to `make ingress`, setting
-  `nodeSelector: {ingress-ready: "true"}` — the label only the
-  control-plane node carries. After the rollout, `kubectl get pods -n
-  ingress-nginx -o wide` showed the pod on `devops-assessment-control-plane`,
-  and the same `curl` succeeded.
+  step to `make ingress`, setting `nodeSelector: {ingress-ready: "true"}` —
+  the label only the control-plane node carries. After the rollout,
+  `kubectl get pods -n ingress-nginx -o wide` showed the pod on
+  `devops-assessment-control-plane`, and the same `curl` succeeded.
 
 ---
 
@@ -330,6 +345,18 @@ persistence crashed the backend:
 
 ---
 
+## Trade-offs and what I'd do with more time
+
+- TLS on the Ingress with cert-manager (everything is plain HTTP locally).
+- Replace ingress-nginx with a maintained controller or the Gateway API.
+- Remove the hardcoded fallback DB credentials in db.js and fail fast if DB
+  settings are missing.
+- Fixed `:dev` image tags need `make redeploy`; CI (Task 4) uses unique
+  branch-sha tags instead.
+- TODO: more after Tasks 4-6.
+
+---
+
 ## Evidence
 
 - [docs/task2-kubectl-get-all.png](docs/task2-kubectl-get-all.png) —
@@ -339,26 +366,3 @@ persistence crashed the backend:
 - [docs/task3-ingress-controller.png](docs/task3-ingress-controller.png) —
   the ingress-nginx controller pod, pinned to the control-plane node after
   the scheduling fix above.
-
----
-
-## Task 4 — CI/CD & Multi-Environment Deployment
-
-TODO
-
-## Task 5 — Platform Services: Redis, Queue, Search, Read/Write DB
-
-TODO
-
-## Task 6 — Observability, Scaling & Rate Limiting
-
-TODO
-
----
-
-## Trade-offs and what I'd do with more time
-
-- TLS on the Ingress with cert-manager (everything is plain HTTP locally).
-- Replace ingress-nginx with a maintained controller or the Gateway API.
-- Remove the hardcoded fallback DB credentials in db.js; fail fast if unset.
-- TODO: add more after Tasks 4–6.
