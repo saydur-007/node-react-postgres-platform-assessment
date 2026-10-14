@@ -353,3 +353,12 @@ TODO
 ## Task 6 — Observability, Scaling & Rate Limiting
 
 TODO
+
+---
+
+## Trade-offs and what I'd do with more time
+
+- TLS on the Ingress with cert-manager (everything is plain HTTP locally).
+- Replace ingress-nginx with a maintained controller or the Gateway API.
+- Remove the hardcoded fallback DB credentials in db.js; fail fast if unset.
+- TODO: add more after Tasks 4–6.
